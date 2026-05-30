@@ -66,3 +66,5 @@ RUN set -eux; \
 COPY --from=jdk17 /opt/java/openjdk /opt/java/jdk17
 COPY --from=jdk25 /opt/java/openjdk /opt/java/jdk25
 RUN /opt/java/jdk17/bin/java --version && /opt/java/jdk25/bin/java --version
+
+COPY build-jdk.sh /usr/local/bin/

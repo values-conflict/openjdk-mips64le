@@ -94,6 +94,31 @@ The primary investigation report. Mostly static -- documents what was found in t
 - synthesis: is the patch set intact? how similar are the ports? what's the porting path?
   was loongarch derived from mips?
 
+### `build-jdk.sh`
+
+**Use this script to build any JDK source tree for mips64el -- do not reconstruct the
+configure command manually.**  It auto-detects the correct boot JDK by reading
+`make/conf/version-numbers.conf` from the source tree and matching against the JDKs
+installed at `/opt/java/jdk{N}`.
+
+Requires the Docker build environment (`debian:bookworm-slim` image with cross-compiler,
+`/opt/java/jdk17` + `/opt/java/jdk25`, `/opt/alsa-stub/libasound.so`, and the uname shim
+at `/usr/local/bin/uname`).  The script is baked into the image at
+`/usr/local/bin/build-jdk.sh` so it is available without cloning this repo.
+
+**Outside the Docker container** (on the Trixie host), the `/opt/java/` and
+`/opt/alsa-stub/` paths won't exist -- use `--with-boot-jdk=` and `--with-alsa-lib=`
+explicitly per the configure command in `porting-notes.md`, and prepend `/tmp/fake-bin`
+to PATH for the uname shim.
+
+```bash
+./build-jdk.sh jdk17u
+./build-jdk.sh tianon-jdk25u-mips64
+```
+
+Output: `$src/build/linux-mips64el-server-release/images/jdk/`
+Build log: `$src/build/linux-mips64el-server-release/build.log`
+
 ### `porting-notes.md`
 
 Living document -- update this as porting or archaeology work progresses. The reference
