@@ -297,12 +297,13 @@ which GCC 14 rejects as always-false address comparisons.  Fix: `--disable-warni
 
 ### Working configure command
 
+`--with-jvm-variants=server` is the default and can be omitted.  `--disable-hotspot-gtest`
+is deprecated/removed in jdk25u and is a no-op in jdk17u; omit it.
+
 ```bash
 PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH bash ./configure \
   --openjdk-target=mips64el-linux-gnuabi64 \
-  --with-jvm-variants=server \
   --with-debug-level=release \
-  --disable-hotspot-gtest \
   --enable-headless-only \
   --with-freetype=bundled \
   --with-harfbuzz=bundled \
@@ -315,8 +316,11 @@ PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH bash ./configure \
   --with-extra-cxxflags="-I/usr/include"
 ```
 
+`legacy-jre-image` is the right make target -- produces `images/jre/` (a runtime without
+javac/jshell/etc.), verified to exist in both jdk17u and jdk25u.
+
 ```bash
-{ time PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH gmake CONF=release images; } \
+{ time PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH gmake CONF=release legacy-jre-image; } \
   2>&1 | tee build/linux-mips64el-server-release/build.log
 ```
 
@@ -325,9 +329,20 @@ PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH bash ./configure \
 - Configuration: `linux-mips64el-server-release`
 - JVM features: `cds compiler2 epsilongc g1gc jfr jni-check jvmti management nmt parallelgc serialgc services vm-structs`
 - No C1 (expected -- mips has no C1), no ZGC, no Shenandoah, no JVMCI
-- Build time: **3m52s wall / 58m18s user** on a 22-core Intel Core Ultra 7 165H
-- Output binary: `build/linux-mips64el-server-release/images/jdk/bin/java`
+- Clean build time: **3m57s wall / 58m12s user** on a 22-core Intel Core Ultra 7 165H
+- Output: `build/linux-mips64el-server-release/images/jre/bin/java`
   - confirmed `ELF 64-bit LSB pie executable, MIPS, MIPS64 rel2`
+
+### Potential future simplification -- `custom-spec.gmk`
+
+The build auto-includes `build/<config>/custom-spec.gmk` if it exists (no configure change
+needed).  Adding `MODULES_FILTER += java.desktop` there would exclude `java.desktop` from the
+build entirely, eliminating the three most complex workarounds: the ALSA stub library,
+`--with-alsa-lib`, and the `--with-extra-cflags/cxxflags="-I/usr/include"` X11 injection (plus
+the 5 X11 dev packages).  The configure-level header checks for cups, fontconfig, and alsa
+are unconditional for Linux and survive regardless.  Worth doing for jdk25u where it reduces
+the configure command by ~3 flags and eliminates the stub-generation script from the
+toolchain setup.
 
 ### QEMU user-mode test results
 
@@ -337,14 +352,14 @@ sysroot provides the dynamic linker at `/usr/mips64el-linux-gnuabi64/lib64/ld.so
 
 ```bash
 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
-  build/linux-mips64el-server-release/images/jdk/bin/java -version
+  build/linux-mips64el-server-release/images/jre/bin/java -version
 ```
 
 Result: **JVM starts and reaches Java-level initialization, then crashes** with
 `SIGBUS (BUS_ADRALN)` in `Thread.<init>` at bytecode offset +21.  Faulting address:
 `0x00000008000410fb` (clearly misaligned -- low 3 bits set).  The crash is identical in
 `-Xint` interpreter mode and with compressed oops disabled, ruling out JIT and compressed
-oops as the proximate cause.
+oops as the proximate cause.  Reproduced consistently across fastdebug and release builds.
 
 **Root cause hypothesis.**  The faulting address pattern (`0x00000008_000410fb`) suggests a
 narrow oop value being used as a raw pointer without the heap base being added, or a
