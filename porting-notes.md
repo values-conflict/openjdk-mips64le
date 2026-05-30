@@ -316,11 +316,13 @@ PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH bash ./configure \
   --with-extra-cxxflags="-I/usr/include"
 ```
 
-`legacy-jre-image` is the right make target -- produces `images/jre/` (a runtime without
-javac/jshell/etc.), verified to exist in both jdk17u and jdk25u.
+`images` is the right make target.  `legacy-jre-image` was evaluated but build time is
+identical (both compile every module; the jlink assembly step is seconds); both produce
+`jmods/`; and `images` is the standard target that also gives you `jlink` and other JDK
+tools in the output in case you need them on the target.
 
 ```bash
-{ time PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH gmake CONF=release legacy-jre-image; } \
+{ time PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH gmake CONF=release images; } \
   2>&1 | tee build/linux-mips64el-server-release/build.log
 ```
 
@@ -333,16 +335,63 @@ javac/jshell/etc.), verified to exist in both jdk17u and jdk25u.
 - Output: `build/linux-mips64el-server-release/images/jre/bin/java`
   - confirmed `ELF 64-bit LSB pie executable, MIPS, MIPS64 rel2`
 
-### Potential future simplification -- `custom-spec.gmk`
+### `custom-spec.gmk` -- documented but not recommended
 
-The build auto-includes `build/<config>/custom-spec.gmk` if it exists (no configure change
-needed).  Adding `MODULES_FILTER += java.desktop` there would exclude `java.desktop` from the
-build entirely, eliminating the three most complex workarounds: the ALSA stub library,
-`--with-alsa-lib`, and the `--with-extra-cflags/cxxflags="-I/usr/include"` X11 injection (plus
-the 5 X11 dev packages).  The configure-level header checks for cups, fontconfig, and alsa
-are unconditional for Linux and survive regardless.  Worth doing for jdk25u where it reduces
-the configure command by ~3 flags and eliminates the stub-generation script from the
-toolchain setup.
+The wall-clock savings are ~40s and the ALSA stub is stable in practice, so this is not
+the primary workflow.  Documented here in case the ALSA stub ever breaks (e.g., libasound
+drops symbols between Debian versions).
+
+Excluding `java.desktop` via `MODULES_FILTER` eliminates the ALSA stub, the X11 header
+injection, and 6 X11 dev packages.  The build auto-includes
+`build/<config>/custom-spec.gmk` if it exists with no configure change required.
+The file does not survive `make dist-clean` or a config directory change and must be
+recreated manually -- that operational overhead is the main downside.
+
+`java.desktop` has 7 transitive dependents in the jdk17u module graph (all confirmed
+via grep of `requires java.desktop` in `module-info.java` files):
+
+```makefile
+MODULES_FILTER += java.desktop
+MODULES_FILTER += java.se
+MODULES_FILTER += jdk.accessibility
+MODULES_FILTER += jdk.editpad
+MODULES_FILTER += jdk.hotspot.agent
+MODULES_FILTER += jdk.jconsole
+MODULES_FILTER += jdk.jpackage
+MODULES_FILTER += jdk.unsupported.desktop
+```
+
+Place this file at `build/linux-mips64el-server-release/custom-spec.gmk` (or whatever the
+config directory is) after configure runs.  The file survives `make clean` but not `make
+dist-clean` or a reconfigure into a new directory -- recreate it from the snippet above.
+
+With this file in place, the configure command simplifies to:
+
+```bash
+PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH bash ./configure \
+  --openjdk-target=mips64el-linux-gnuabi64 \
+  --with-debug-level=release \
+  --enable-headless-only \
+  --with-freetype=bundled \
+  --with-harfbuzz=bundled \
+  --with-cups-include=/usr/include \
+  --with-fontconfig-include=/usr/include \
+  --with-alsa-include=/usr/include \
+  --disable-warnings-as-errors
+```
+
+Eliminated vs the full configure: `--with-alsa-lib` (and the entire ALSA stub generation
+script), `--with-extra-cflags="-I/usr/include"`, `--with-extra-cxxflags="-I/usr/include"`,
+and 6 X11 dev packages (`libx11-dev`, `libxrender-dev`, `libxext-dev`, `libxi-dev`,
+`libxrandr-dev`, `libxtst-dev`).  The three remaining `--with-*-include` flags survive
+because configure's `NEEDS_LIB_CUPS/ALSA/FONTCONFIG` checks are unconditional for Linux
+regardless of which modules get built.
+
+Build timing with `custom-spec.gmk` (clean): **3m15s wall / 50m22s user** -- slightly
+faster than the full build (fewer modules compiled).
+
+The `custom-spec.gmk` module list should be re-verified for jdk25u since the dependency
+graph may differ.
 
 ### QEMU user-mode test results
 
@@ -379,7 +428,9 @@ handler and instead delivers `SIGBUS` directly to the process.
 | --- | --- |
 | Cross-compiler produces MIPS64 ELF | yes |
 | jdk17u mips port compiles with GCC 14 | yes (with `--disable-warnings-as-errors`) |
-| Build time on 22-core x86-64 | 3m52s wall / 58m18s user |
+| Build time, full (22-core x86-64) | 3m57s wall / 58m12s user |
+| Build time, `custom-spec.gmk` (no desktop) | 3m15s wall / 50m22s user |
+| Make target | `images` (`legacy-jre-image` saves no time -- identical compilation) |
 | JVM loads under QEMU user-mode | yes -- reaches Java-level `Thread.<init>` |
 | `java -version` completes under QEMU | no -- SIGBUS in interpreter (unaligned access) |
 | QEMU full system / real hardware needed | yes |
