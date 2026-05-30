@@ -11,6 +11,20 @@ The target workload is the Jenkins remoting agent -- a pure-Java process that ru
 - QEMU user-mode is sufficient for testing (no GUI or hardware I/O required)
 - the final deliverable is a server JVM, not a desktop JDK
 
+## Target Hardware
+
+The Loongson MIPS64el machine that will run the Jenkins agent:
+
+- OS: Debian GNU/Linux 12 (Bookworm)
+- glibc: 2.36 (Debian GLIBC 2.36-9+deb12u14)
+- Kernel: `4.19.0-12-loongson-3` -- Loongson-provided, SMP, 2021-06-19
+- CPU: `Loongson-3 V0.13  FPU V0.1`
+
+**Build implication:** the Dockerfile and cross-compilation environment must target glibc 2.36.
+Trixie's cross-compiler sysroot (glibc 2.40) causes `_GNU_SOURCE` to activate
+`_ISOC23_SOURCE`, which redirects `sscanf` to `__isoc23_sscanf@GLIBC_2.38` -- absent on
+the target.  The Dockerfile base image must be `debian:bookworm-slim` to match.
+
 ## Conventions
 
 This workspace is Tianon-authored -- apply his formatting and style conventions to files
@@ -96,12 +110,11 @@ file for any LLM doing hands-on work. Covers:
 
 ## Suggested Next Steps
 
-**Phase 0 is complete (2026-05-30).**  jdk17u mips64el builds successfully with GCC 14 on
-Debian Trixie.  The JVM loads under QEMU user-mode but crashes before `java -version`
-completes due to a MIPS unaligned-access issue that the Linux kernel emulates on real
-hardware but QEMU user-mode does not.  QEMU full system or real Loongson hardware is
-required for complete validation.  See `porting-notes.md` Phase 0 section for the full
-configure command, all workarounds, and the SIGBUS root-cause analysis.
+**Phase 0 is complete (2026-05-30).**  jdk17u mips64el builds successfully with GCC 12 on
+Debian Bookworm and `java --version` runs correctly on the real Loongson-3 target machine.
+Build host must be `debian:bookworm-slim` -- Trixie's glibc 2.40 cross-compiler sysroot
+produces `__isoc23_sscanf@GLIBC_2.38` references that are absent on the target's glibc 2.36.
+See `porting-notes.md` Phase 0 section for the full configure command and all workarounds.
 
 1. **obtain QEMU full system or real hardware** -- QEMU user-mode cannot complete `java
    -version` due to missing kernel unaligned-access emulation.  A Debian mips64el QEMU

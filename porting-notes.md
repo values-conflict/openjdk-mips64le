@@ -265,8 +265,8 @@ mode, but `libawt` still includes X11 headers unconditionally.  Fix for headers:
 x86-64 dev packages (`libcups2-dev`, `libfontconfig1-dev`, `libasound2-dev`, `libx11-dev`,
 `libxrender-dev`, `libxext-dev`, `libxi-dev`, `libxrandr-dev`, `libxtst-dev`) and pass
 `--with-cups-include=/usr/include`, `--with-fontconfig-include=/usr/include`,
-`--with-alsa-include=/usr/include`, plus `--with-extra-cflags="-I/usr/include"` and
-`--with-extra-cxxflags="-I/usr/include"` for X11.  These are header-only uses
+`--with-alsa-include=/usr/include`, plus `--with-extra-cflags='-I/usr/include'` and
+`--with-extra-cxxflags='-I/usr/include'` for X11.  These are header-only uses
 (all three libraries are `dlopen`'d at runtime) so mixing x86-64 headers into a mips64el
 build is safe.
 
@@ -301,8 +301,9 @@ which GCC 14 rejects as always-false address comparisons.  Fix: `--disable-warni
 is deprecated/removed in jdk25u and is a no-op in jdk17u; omit it.
 
 ```bash
-PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH bash ./configure \
+PATH=/tmp/fake-bin:$PATH bash ./configure \
   --openjdk-target=mips64el-linux-gnuabi64 \
+  --with-boot-jdk=/opt/java/jdk17 \
   --with-debug-level=release \
   --enable-headless-only \
   --with-freetype=bundled \
@@ -310,10 +311,13 @@ PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH bash ./configure \
   --with-cups-include=/usr/include \
   --with-fontconfig-include=/usr/include \
   --with-alsa-include=/usr/include \
-  --with-alsa-lib=/tmp/alsa-stub-lib \
+  --with-alsa-lib=/opt/alsa-stub \
   --disable-warnings-as-errors \
-  --with-extra-cflags="-I/usr/include" \
-  --with-extra-cxxflags="-I/usr/include"
+  --with-extra-cflags='-I/usr/include' \
+  --with-extra-cxxflags='-I/usr/include' \
+  --with-vendor-version-string=Tianon \
+  --with-vendor-url='https://github.com/values-conflict/openjdk-mips64le' \
+  --with-vendor-bug-url='https://github.com/values-conflict/openjdk-mips64le'
 ```
 
 `images` is the right make target.  `legacy-jre-image` was evaluated but build time is
@@ -381,7 +385,7 @@ PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH bash ./configure \
 ```
 
 Eliminated vs the full configure: `--with-alsa-lib` (and the entire ALSA stub generation
-script), `--with-extra-cflags="-I/usr/include"`, `--with-extra-cxxflags="-I/usr/include"`,
+script), `--with-extra-cflags='-I/usr/include'`, `--with-extra-cxxflags='-I/usr/include'`,
 and 6 X11 dev packages (`libx11-dev`, `libxrender-dev`, `libxext-dev`, `libxi-dev`,
 `libxrandr-dev`, `libxtst-dev`).  The three remaining `--with-*-include` flags survive
 because configure's `NEEDS_LIB_CUPS/ALSA/FONTCONFIG` checks are unconditional for Linux
@@ -422,18 +426,40 @@ handler and instead delivers `SIGBUS` directly to the process.
 - Insufficient for JVM boot testing -- QEMU does not emulate the MIPS unaligned-access kernel handler
 - QEMU full system emulation (with a proper MIPS kernel) or real Loongson hardware is required for `java -version`
 
+### Real hardware test result -- glibc mismatch
+
+Tested on target (Loongson-3 V0.13, Debian Bookworm, glibc 2.36, kernel 4.19.0-12-loongson-3):
+
+```
+./test-jdk17/bin/java: /lib/mips64el-linux-gnuabi64/libc.so.6:
+  version `GLIBC_2.38' not found (required by .../lib/libjli.so)
+```
+
+**Root cause.**  The build host (Debian Trixie, glibc 2.40) has a cross-compiler sysroot
+with glibc 2.40 headers.  In glibc 2.38+, defining `_GNU_SOURCE` (which OpenJDK does)
+implicitly sets `_ISOC23_SOURCE=1`, which causes `sscanf` to be redirected to
+`__isoc23_sscanf@GLIBC_2.38` via `__REDIRECT_NTH`.  The target glibc 2.36 predates this
+change and does not have `__isoc23_sscanf`.  The full chain in glibc 2.40's `features.h`:
+`_GNU_SOURCE → _ISOC23_SOURCE=1 → __GLIBC_USE_ISOC23=1 → __GLIBC_USE_C23_STRTOL=1 →
+sscanf redirected to __isoc23_sscanf@GLIBC_2.38`.
+
+**Fix.**  Build inside a `debian:bookworm-slim` container (glibc 2.36 sysroot), which
+predates the `_GNU_SOURCE → _ISOC23_SOURCE` chain entirely.  The Dockerfile has been
+updated accordingly.  Note: `apt-get dist-clean` is Trixie-only (APT 2.7.8+); Bookworm
+requires the traditional `rm -rf /var/lib/apt/lists/*` instead.
+
 ### Phase 0 summary
 
 | Objective | Result |
 | --- | --- |
 | Cross-compiler produces MIPS64 ELF | yes |
-| jdk17u mips port compiles with GCC 14 | yes (with `--disable-warnings-as-errors`) |
-| Build time, full (22-core x86-64) | 3m57s wall / 58m12s user |
-| Build time, `custom-spec.gmk` (no desktop) | 3m15s wall / 50m22s user |
+| jdk17u mips port compiles with GCC 12 (Bookworm) | yes (with `--disable-warnings-as-errors`) |
+| Build time, full (22-core x86-64) | 3m56s wall / 57m51s user |
 | Make target | `images` (`legacy-jre-image` saves no time -- identical compilation) |
 | JVM loads under QEMU user-mode | yes -- reaches Java-level `Thread.<init>` |
 | `java -version` completes under QEMU | no -- SIGBUS in interpreter (unaligned access) |
-| QEMU full system / real hardware needed | yes |
+| `java -version` on real hardware (Bookworm build) | **yes** -- `openjdk 17.0.19-internal` |
+| Build host must be | `debian:bookworm-slim` (glibc 2.36, matches target) |
 
 ---
 
