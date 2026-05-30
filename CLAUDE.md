@@ -13,8 +13,14 @@ Three shallow-cloned-then-unshallowed forks of OpenJDK from `github.com/loongson
 | `jdk17u/` | `https://github.com/loongson/jdk17u.git` | `master-ls` | mips64le + LoongArch64 (primary reference) |
 | `jdk25u/` | `https://github.com/loongson/jdk25u.git` | `loongarch-port` | LoongArch64 only |
 
-All three were fully unshallowed on 2026-05-30. History is complete. No uncommitted
-changes; do not create commits here.
+All three were fully unshallowed on 2026-05-30. jdk11u and jdk17u use jdk25u as a
+Git objects alternate (`../../../jdk25u/.git/objects` in each repo's
+`.git/objects/info/alternates`), so most upstream JDK history is stored only once.
+No uncommitted changes; do not create commits here.
+
+To rehydrate: clone and unshallow jdk25u first, then clone and unshallow jdk11u and
+jdk17u, manually write the alternates entry into each, and run `git repack -a -d -l`
+in each to deduplicate.
 
 ## Key Facts
 
