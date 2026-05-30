@@ -14,18 +14,23 @@ existing style when editing files there.
 
 ## Repos
 
-Three read-only reference forks of OpenJDK from `github.com/loongson/` (gitignored):
+Read-only reference forks of OpenJDK from `github.com/loongson/` (gitignored):
 
 | Directory | Remote | Branch | Architecture coverage |
 | --- | --- | --- | --- |
-| `jdk11u/` | `https://github.com/loongson/jdk11u.git` | `master-ls` | mips64le + LoongArch64 |
 | `jdk17u/` | `https://github.com/loongson/jdk17u.git` | `master-ls` | mips64le + LoongArch64 (primary reference) |
 | `jdk25u/` | `https://github.com/loongson/jdk25u.git` | `loongarch-port` | LoongArch64 only |
+| `jdk11u/` | `https://github.com/loongson/jdk11u.git` | `master-ls` | mips64le + LoongArch64 -- *not checked out* |
 
-All three were fully unshallowed on 2026-05-30. All three use this workspace's object
-store (`../../../.git/objects` in each repo's `.git/objects/info/alternates`) -- all
-upstream JDK history lives in the workspace `.git`, fetched from the `jdk25u` branch.
+`jdk17u/` and `jdk25u/` were fully unshallowed on 2026-05-30. Both use this workspace's
+object store (`../../../.git/objects` in each repo's `.git/objects/info/alternates`) --
+all upstream JDK history lives in the workspace `.git`, fetched from the `jdk25u` branch.
 No uncommitted changes in the reference repos; do not create commits there.
+
+`jdk11u/` was unshallowed on 2026-05-30 but has since been removed -- it covered the same
+mips64le port as jdk17u but was older (68 files vs jdk17u's larger set) and is not needed
+for porting work. Rehydrate the same way as the other reference repos if a cross-check is
+ever needed.
 
 `tianon-jdk25u-mips64/` is a tracked git submodule on the `jdk25u` branch of
 `https://github.com/values-conflict/openjdk-mips64le.git` (the same repo as this
