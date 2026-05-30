@@ -7,11 +7,11 @@ mips64le support and what it would take to forward-port it to JDK 25.
 
 Three shallow-cloned-then-unshallowed forks of OpenJDK from `github.com/loongson/`:
 
-| Directory | Branch | Architecture coverage |
-| --- | --- | --- |
-| `jdk11u/` | `master-ls` | mips64le + LoongArch64 |
-| `jdk17u/` | `master-ls` | mips64le + LoongArch64 (primary reference) |
-| `jdk25u/` | `loongarch-port` | LoongArch64 only |
+| Directory | Remote | Branch | Architecture coverage |
+| --- | --- | --- | --- |
+| `jdk11u/` | `https://github.com/loongson/jdk11u.git` | `master-ls` | mips64le + LoongArch64 |
+| `jdk17u/` | `https://github.com/loongson/jdk17u.git` | `master-ls` | mips64le + LoongArch64 (primary reference) |
+| `jdk25u/` | `https://github.com/loongson/jdk25u.git` | `loongarch-port` | LoongArch64 only |
 
 All three were fully unshallowed on 2026-05-30. History is complete. No uncommitted
 changes; do not create commits here.
