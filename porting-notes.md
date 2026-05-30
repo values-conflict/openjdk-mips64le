@@ -219,52 +219,155 @@ relevant in later phases.
 
 ## Phase 0 -- Build jdk17u mips64el and Establish Baseline
 
-Before touching jdk25u, build jdk17u's existing mips64le port. This validates the toolchain,
-establishes build time, and answers the testing question before any forward-port work begins.
+**Status: build complete 2026-05-30.  QEMU user-mode test reached JVM initialization but
+did not complete `java -version` (see below).**
 
-### Toolchain
+### Environment
 
-Cross-compilation from x86-64 Linux (Debian/Ubuntu):
+- Host: x86-64 Debian 13 "Trixie" (in Docker container inside WSL2)
+- Cross-compiler: `gcc-mips64el-linux-gnuabi64` / `g++-mips64el-linux-gnuabi64` 14.2.0 (from Trixie `main`)
+- Boot JDK: Eclipse Temurin 17.0.19+10 (downloaded separately; JDK 17 is not in Trixie)
+- Machine: Intel Core Ultra 7 165H, 22 cores, 32 GB RAM
+
+### Obstacles and solutions
+
+**WSL detection.**  `config.guess` returns `x86_64-pc-wsl`; OpenJDK maps that to
+`windows`, activating Windows-specific path handling that immediately fails.  `--build`
+cannot be combined with `--openjdk-target`.  Fix: put a `uname` shim early in `PATH`
+that strips `-microsoft-` from `uname -r` output, causing `config.guess` to return
+`x86_64-unknown-linux-gnu` instead.
 
 ```bash
-apt install gcc-mips64el-linux-gnuabi64 g++-mips64el-linux-gnuabi64
+mkdir -p /tmp/fake-bin
+cat > /tmp/fake-bin/uname << 'EOF'
+#!/bin/sh
+case "$1" in
+    -r) /bin/uname -r | sed 's/-microsoft-/-/g' ;;
+    *)  exec /bin/uname "$@" ;;
+esac
+EOF
+chmod +x /tmp/fake-bin/uname
+# then prepend /tmp/fake-bin to PATH when running configure and make
 ```
 
-For a `--with-boot-jdk` you need a pre-built JDK 17 for x86-64. The cross-compiler handles
-the native (C++) portions; the Java portions are compiled by the boot JDK on the host.
+**Cross-compiler triplet mismatch.**  `--openjdk-target=mips64el-linux-gnu` makes configure
+look for `mips64el-linux-gnu-gcc`, but Debian's package installs `mips64el-linux-gnuabi64-gcc`.
+Fix: use `--openjdk-target=mips64el-linux-gnuabi64`.
 
-### Build command
+**Boot JDK version.**  JDK 17 is absent from Trixie apt; JDK 21 is available but jdk17u
+configure rejects it (requires 16 or 17).  Fix: download Temurin 17 JDK tarball and extract
+to `~/bin/temurin17`; add `~/bin/temurin17/bin` to PATH so configure auto-detects it.
+
+**mips64el system libraries absent from Trixie.**  Trixie dropped mips64el from main repos
+and Debian ports no longer carries it either.  cups, fontconfig, and ALSA headers are all
+required by jdk17u even for `--enable-headless-only` builds.  X11 is skipped by headless
+mode, but `libawt` still includes X11 headers unconditionally.  Fix for headers: install the
+x86-64 dev packages (`libcups2-dev`, `libfontconfig1-dev`, `libasound2-dev`, `libx11-dev`,
+`libxrender-dev`, `libxext-dev`, `libxi-dev`, `libxrandr-dev`, `libxtst-dev`) and pass
+`--with-cups-include=/usr/include`, `--with-fontconfig-include=/usr/include`,
+`--with-alsa-include=/usr/include`, plus `--with-extra-cflags="-I/usr/include"` and
+`--with-extra-cxxflags="-I/usr/include"` for X11.  These are header-only uses
+(all three libraries are `dlopen`'d at runtime) so mixing x86-64 headers into a mips64el
+build is safe.
+
+**ALSA is directly linked.**  Unlike cups and fontconfig, `libjsound.so` links directly
+against `-lasound` (not via `dlopen`).  The mips64el `libasound.so` stub must export all
+symbols or the linker fails.  Fix: generate a stub from the x86-64 symbol table and compile
+it with the cross-compiler:
 
 ```bash
-cd /home/user/loongson-java/jdk17u
-bash ./configure \
-  --openjdk-target=mips64el-linux-gnu \
+nm --dynamic /usr/lib/x86_64-linux-gnu/libasound.so.2.0.0 \
+  | awk '$2 == "T" {sub(/@.*/,"",$3); print $3}' \
+  | sort --unique \
+  > /tmp/alsa-syms.txt
+{
+  printf '/* mips64el libasound stub -- real library used at runtime */\n'
+  while IFS= read -r sym; do
+    printf 'void __attribute__((visibility("default"))) %s(void){}\n' "$sym"
+  done < /tmp/alsa-syms.txt
+} > /tmp/alsa-stub.c
+mkdir -p /tmp/alsa-stub-lib
+mips64el-linux-gnuabi64-gcc -shared -fPIC \
+  -o /tmp/alsa-stub-lib/libasound.so /tmp/alsa-stub.c
+# then pass --with-alsa-lib=/tmp/alsa-stub-lib to configure
+```
+
+**GCC 14 `-Werror=address`.**  `mips_64.ad` contains patterns like `if (&var == NULL)`
+which GCC 14 rejects as always-false address comparisons.  Fix: `--disable-warnings-as-errors`.
+
+### Working configure command
+
+```bash
+PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH bash ./configure \
+  --openjdk-target=mips64el-linux-gnuabi64 \
   --with-jvm-variants=server \
-  --with-boot-jdk=/path/to/host-jdk17 \
-  --with-debug-level=fastdebug \
-  --disable-hotspot-gtest
-make images
+  --with-debug-level=release \
+  --disable-hotspot-gtest \
+  --enable-headless-only \
+  --with-freetype=bundled \
+  --with-harfbuzz=bundled \
+  --with-cups-include=/usr/include \
+  --with-fontconfig-include=/usr/include \
+  --with-alsa-include=/usr/include \
+  --with-alsa-lib=/tmp/alsa-stub-lib \
+  --disable-warnings-as-errors \
+  --with-extra-cflags="-I/usr/include" \
+  --with-extra-cxxflags="-I/usr/include"
 ```
 
-### Testing methodology -- the open question
+```bash
+{ time PATH=/tmp/fake-bin:$HOME/bin/temurin17/bin:$PATH gmake CONF=release images; } \
+  2>&1 | tee build/linux-mips64el-server-release/build.log
+```
 
-A mips64el JDK image can't execute directly on x86-64. Options:
+### Build results
 
-- **QEMU user-mode** (`qemu-mips64el-static`): runs individual MIPS binaries transparently via `binfmt_misc`; enough to run `java -version` and single-JVM tests; can't run tests that fork multiple processes or use signals in complex ways
-- **QEMU full system**: full MIPS64 VM; slower (~10x slower than native) but complete
-- **Native Loongson hardware**: older Loongson 3A/3B machines ran mips64el; fastest and most faithful, but availability is limited
+- Configuration: `linux-mips64el-server-release`
+- JVM features: `cds compiler2 epsilongc g1gc jfr jni-check jvmti management nmt parallelgc serialgc services vm-structs`
+- No C1 (expected -- mips has no C1), no ZGC, no Shenandoah, no JVMCI
+- Build time: **3m52s wall / 58m18s user** on a 22-core Intel Core Ultra 7 165H
+- Output binary: `build/linux-mips64el-server-release/images/jdk/bin/java`
+  - confirmed `ELF 64-bit LSB pie executable, MIPS, MIPS64 rel2`
 
-Recommend confirming which approach is available before starting Phase 1. The answer affects
-how long the edit-build-test loop takes, which in turn affects how aggressively to batch
-changes.
+### QEMU user-mode test results
 
-### Phase 0 objectives
+binfmt_misc is configured system-wide; mips64el ELFs execute transparently.  The cross-compiler
+sysroot provides the dynamic linker at `/usr/mips64el-linux-gnuabi64/lib64/ld.so.1`; set
+`QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64` to point QEMU at it.
 
-- Confirm the cross-compiler produces working MIPS64 binaries
-- Measure build time (OpenJDK full build: typically 30-60 minutes on modern x86-64)
-- Run `java -version` and `java -XshowSettings:all -version` under QEMU to confirm the JVM boots
-- Note any pre-existing test failures on jdk17u master-ls -- this is the baseline to beat, not zero
-- Establish the edit-build-test cycle time before designing how to work in Phase 1
+```bash
+QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  build/linux-mips64el-server-release/images/jdk/bin/java -version
+```
+
+Result: **JVM starts and reaches Java-level initialization, then crashes** with
+`SIGBUS (BUS_ADRALN)` in `Thread.<init>` at bytecode offset +21.  Faulting address:
+`0x00000008000410fb` (clearly misaligned -- low 3 bits set).  The crash is identical in
+`-Xint` interpreter mode and with compressed oops disabled, ruling out JIT and compressed
+oops as the proximate cause.
+
+**Root cause hypothesis.**  The faulting address pattern (`0x00000008_000410fb`) suggests a
+narrow oop value being used as a raw pointer without the heap base being added, or a
+shift-and-add decode that produces a misaligned result.  This is a bug in the MIPS template
+interpreter's object reference handling that would be papered over on real hardware: the
+Linux/MIPS kernel's unaligned-access handler (`arch/mips/kernel/unaligned.c`) emulates
+misaligned loads/stores transparently.  QEMU user-mode does not replicate this kernel-level
+handler and instead delivers `SIGBUS` directly to the process.
+
+**Conclusion for QEMU user-mode testing:**
+- Insufficient for JVM boot testing -- QEMU does not emulate the MIPS unaligned-access kernel handler
+- QEMU full system emulation (with a proper MIPS kernel) or real Loongson hardware is required for `java -version`
+
+### Phase 0 summary
+
+| Objective | Result |
+| --- | --- |
+| Cross-compiler produces MIPS64 ELF | yes |
+| jdk17u mips port compiles with GCC 14 | yes (with `--disable-warnings-as-errors`) |
+| Build time on 22-core x86-64 | 3m52s wall / 58m18s user |
+| JVM loads under QEMU user-mode | yes -- reaches Java-level `Thread.<init>` |
+| `java -version` completes under QEMU | no -- SIGBUS in interpreter (unaligned access) |
+| QEMU full system / real hardware needed | yes |
 
 ---
 

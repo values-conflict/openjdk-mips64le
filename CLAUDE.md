@@ -96,16 +96,27 @@ file for any LLM doing hands-on work. Covers:
 
 ## Suggested Next Steps
 
-1. **produce the full loongarch delta** -- diff jdk17u loongarch vs jdk25u loongarch for
+**Phase 0 is complete (2026-05-30).**  jdk17u mips64el builds successfully with GCC 14 on
+Debian Trixie.  The JVM loads under QEMU user-mode but crashes before `java -version`
+completes due to a MIPS unaligned-access issue that the Linux kernel emulates on real
+hardware but QEMU user-mode does not.  QEMU full system or real Loongson hardware is
+required for complete validation.  See `porting-notes.md` Phase 0 section for the full
+configure command, all workarounds, and the SIGBUS root-cause analysis.
+
+1. **obtain QEMU full system or real hardware** -- QEMU user-mode cannot complete `java
+   -version` due to missing kernel unaligned-access emulation.  A Debian mips64el QEMU
+   system image or a real Loongson 3A/3B machine is the next testing blocker.
+
+2. **produce the full loongarch delta** -- diff jdk17u loongarch vs jdk25u loongarch for
    each key file to get the exact API change guide for the forward port.
    See the "Diff a file between the two eras" command in `porting-notes.md`.
 
-2. **verify icBuffer / depChecker removal** -- confirm neither has a jdk25u equivalent:
+3. **verify icBuffer / depChecker removal** -- confirm neither has a jdk25u equivalent:
    `git -C jdk25u ls-tree -r HEAD src/hotspot/cpu/loongarch/ | grep -i 'icbuf\|depcheck'`
 
-3. **verify SA removal** -- confirm `jdk.hotspot.agent` is gone in jdk25u:
+4. **verify SA removal** -- confirm `jdk.hotspot.agent` is gone in jdk25u:
    `git -C jdk25u ls-tree --name-only -r HEAD | grep hotspot.agent`
 
-4. **note on `jdk17_35`** -- the origin of this version string is unclear; it does not
+5. **note on `jdk17_35`** -- the origin of this version string is unclear; it does not
    correspond to any tag in these repos or any known public fork. Treat it as unresolvable
    and use jdk17u `master-ls` HEAD as the mips64le reference instead.
