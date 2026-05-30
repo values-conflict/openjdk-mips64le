@@ -3,6 +3,14 @@
 Working directory for archaeology of Loongson's OpenJDK forks, focused on understanding
 mips64le support and what it would take to forward-port it to JDK 25.
 
+## End Goal
+
+The target workload is the Jenkins remoting agent -- a pure-Java process that runs headless.  This means:
+
+- `--enable-headless-only` is correct for all build phases; no AWT, Swing, sound, X11, or fontconfig needed
+- QEMU user-mode is sufficient for testing (no GUI or hardware I/O required)
+- the final deliverable is a server JVM, not a desktop JDK
+
 ## Conventions
 
 This workspace is Tianon-authored -- apply his formatting and style conventions to files
