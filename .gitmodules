@@ -1,0 +1,3 @@
+[submodule "tianon-jdk25u-mips64"]
+	path = tianon-jdk25u-mips64
+	url = https://github.com/values-conflict/openjdk-mips64le.git

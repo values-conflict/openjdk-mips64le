@@ -3,9 +3,18 @@
 Working directory for archaeology of Loongson's OpenJDK forks, focused on understanding
 mips64le support and what it would take to forward-port it to JDK 25.
 
+## Conventions
+
+This workspace is Tianon-authored -- apply his formatting and style conventions to files
+written directly here (`.md` docs, scripts, etc.).
+
+OpenJDK source files inside any of the JDK repo directories (including
+`tianon-jdk25u-mips64/`) follow OpenJDK conventions, not Tianon's -- preserve their
+existing style when editing files there.
+
 ## Repos
 
-Three shallow-cloned-then-unshallowed forks of OpenJDK from `github.com/loongson/`:
+Three read-only reference forks of OpenJDK from `github.com/loongson/` (gitignored):
 
 | Directory | Remote | Branch | Architecture coverage |
 | --- | --- | --- | --- |
@@ -13,14 +22,22 @@ Three shallow-cloned-then-unshallowed forks of OpenJDK from `github.com/loongson
 | `jdk17u/` | `https://github.com/loongson/jdk17u.git` | `master-ls` | mips64le + LoongArch64 (primary reference) |
 | `jdk25u/` | `https://github.com/loongson/jdk25u.git` | `loongarch-port` | LoongArch64 only |
 
-All three were fully unshallowed on 2026-05-30. jdk11u and jdk17u use jdk25u as a
-Git objects alternate (`../../../jdk25u/.git/objects` in each repo's
-`.git/objects/info/alternates`), so most upstream JDK history is stored only once.
-No uncommitted changes; do not create commits here.
+All three were fully unshallowed on 2026-05-30. All three use this workspace's object
+store (`../../../.git/objects` in each repo's `.git/objects/info/alternates`) -- all
+upstream JDK history lives in the workspace `.git`, fetched from the `jdk25u` branch.
+No uncommitted changes in the reference repos; do not create commits there.
 
-To rehydrate: clone and unshallow jdk25u first, then clone and unshallow jdk11u and
-jdk17u, manually write the alternates entry into each, and run `git repack -a -d -l`
-in each to deduplicate.
+`tianon-jdk25u-mips64/` is a tracked git submodule on the `jdk25u` branch of
+`https://github.com/values-conflict/openjdk-mips64le.git` (the same repo as this
+workspace's `main` branch; push via SSH). It also uses `../../../.git/objects` as its
+alternate.
+
+To rehydrate: clone this repo first, then run `git fetch --no-tags origin jdk25u` to
+populate the workspace object store with all JDK history. Initialize the submodule via
+`git submodule update --init --reference .`, overwrite the absolute path git writes in
+`tianon-jdk25u-mips64/.git/objects/info/alternates` with `../../../.git/objects`, and
+run `git repack -a -d -l` in it. For each reference repo, clone with `--reference .`,
+apply the same alternates fix (`../../../.git/objects`), and repack.
 
 ## Key Facts
 
@@ -40,42 +57,42 @@ in each to deduplicate.
 
 The primary investigation report. Mostly static -- documents what was found in the
 2026-05-30 investigation. Covers:
-- Tag landscape and what `jdk17_35` means (or doesn't)
-- Inventory of mips64le files across all modules in jdk17u
-- Architecture capabilities table (which GCs, which JIT tiers, Panama, Loom, JVMCI)
+- tag landscape and what `jdk17_35` means (or doesn't)
+- inventory of mips64le files across all modules in jdk17u
+- architecture capabilities table (which GCs, which JIT tiers, Panama, Loom, JVMCI)
 - Loongson commit timeline for both architectures
 - jdk25u LoongArch inventory with size comparisons vs mips64
-- Table of 45 new files a mips64 jdk25u port would need to add
+- table of 45 new files a mips64 jdk25u port would need to add
 - jdk11u cross-check (68 files, older/smaller than jdk17u)
-- Synthesis: is the patch set intact? how similar are the ports? what's the porting path?
+- synthesis: is the patch set intact? how similar are the ports? what's the porting path?
   was loongarch derived from mips?
 
 ### `porting-notes.md`
 
 Living document -- update this as porting or archaeology work progresses. The reference
 file for any LLM doing hands-on work. Covers:
-- Complete file mapping: every jdk17u mips file → its jdk25u loongarch equivalent,
+- complete file mapping: every jdk17u mips file → its jdk25u loongarch equivalent,
   including renamed files, files upgraded from header-only, and files removed upstream
-- Critical API changes between JDK 17 and JDK 25 (CP cache API replacement, signature
+- critical API changes between JDK 17 and JDK 25 (CP cache API replacement, signature
   changes, Loom entry points)
-- New files needed for a jdk25u mips port, organized by phase
-- Build system wiring (platform.m4, jvm-features.m4 excerpts, configure command)
+- new files needed for a jdk25u mips port, organized by phase
+- build system wiring (platform.m4, jvm-features.m4 excerpts, configure command)
 - C1 file reference list with which files were removed in jdk25u
 - Bash recipes for finding Loongson commits, diffing file pairs, and verifying open questions
-- Background: tag mystery, author notes, jdk11u vs jdk17u differences
+- background: tag mystery, author notes, jdk11u vs jdk17u differences
 
 ## Suggested Next Steps
 
-1. **Produce the full loongarch delta** -- diff jdk17u loongarch vs jdk25u loongarch for
+1. **produce the full loongarch delta** -- diff jdk17u loongarch vs jdk25u loongarch for
    each key file to get the exact API change guide for the forward port.
    See the "Diff a file between the two eras" command in `porting-notes.md`.
 
-2. **Verify icBuffer / depChecker removal** -- confirm neither has a jdk25u equivalent:
+2. **verify icBuffer / depChecker removal** -- confirm neither has a jdk25u equivalent:
    `git -C jdk25u ls-tree -r HEAD src/hotspot/cpu/loongarch/ | grep -i 'icbuf\|depcheck'`
 
-3. **Verify SA removal** -- confirm `jdk.hotspot.agent` is gone in jdk25u:
+3. **verify SA removal** -- confirm `jdk.hotspot.agent` is gone in jdk25u:
    `git -C jdk25u ls-tree --name-only -r HEAD | grep hotspot.agent`
 
-4. **Note on `jdk17_35`** -- the origin of this version string is unclear; it does not
+4. **note on `jdk17_35`** -- the origin of this version string is unclear; it does not
    correspond to any tag in these repos or any known public fork. Treat it as unresolvable
    and use jdk17u `master-ls` HEAD as the mips64le reference instead.
