@@ -399,32 +399,43 @@ graph may differ.
 
 ### QEMU user-mode test results
 
-binfmt_misc is configured system-wide; mips64el ELFs execute transparently.  The cross-compiler
-sysroot provides the dynamic linker at `/usr/mips64el-linux-gnuabi64/lib64/ld.so.1`; set
-`QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64` to point QEMU at it.
+Both `QEMU_CPU` and `QEMU_LD_PREFIX` are environment variables recognised by QEMU
+user-mode (see `qemu-mips64el --help`).  They work whether `qemu-mips64el` is invoked
+directly or whether a binfmt_misc handler on the host runs it transparently:
 
 ```bash
-QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
-  build/linux-mips64el-server-release/images/jre/bin/java -version
+QEMU_CPU=Loongson-3A1000 \
+  QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  build/linux-mips64el-server-release/images/jdk/bin/java -version
 ```
 
-Result: **JVM starts and reaches Java-level initialization, then crashes** with
-`SIGBUS (BUS_ADRALN)` in `Thread.<init>` at bytecode offset +21.  Faulting address:
-`0x00000008000410fb` (clearly misaligned -- low 3 bits set).  The crash is identical in
-`-Xint` interpreter mode and with compressed oops disabled, ruling out JIT and compressed
-oops as the proximate cause.  Reproduced consistently across fastdebug and release builds.
+Result:
 
-**Root cause hypothesis.**  The faulting address pattern (`0x00000008_000410fb`) suggests a
-narrow oop value being used as a raw pointer without the heap base being added, or a
-shift-and-add decode that produces a misaligned result.  This is a bug in the MIPS template
-interpreter's object reference handling that would be papered over on real hardware: the
-Linux/MIPS kernel's unaligned-access handler (`arch/mips/kernel/unaligned.c`) emulates
-misaligned loads/stores transparently.  QEMU user-mode does not replicate this kernel-level
-handler and instead delivers `SIGBUS` directly to the process.
+```
+openjdk version "17.0.19-internal" 2026-04-21
+OpenJDK Runtime Environment Tianon (build 17.0.19-internal+0-adhoc..jdk17u)
+OpenJDK 64-Bit Server VM Tianon (build 17.0.19-internal+0-adhoc..jdk17u, mixed mode)
+```
 
-**Conclusion for QEMU user-mode testing:**
-- Insufficient for JVM boot testing -- QEMU does not emulate the MIPS unaligned-access kernel handler
-- QEMU full system emulation (with a proper MIPS kernel) or real Loongson hardware is required for `java -version`
+**`QEMU_CPU=Loongson-3A1000` is required.**  Without it QEMU uses the default MIPS CPU
+model (`MIPS64R2-generic`), which enforces strict alignment and delivers `SIGBUS` on any
+misaligned access.  The Loongson CPU models emulate the Loongson-3 kernel's
+unaligned-access trap handler (`arch/mips/kernel/unaligned.c`), matching real hardware
+behaviour.  `Loongson-3A1000` is the closest match to the target hardware (Loongson-3
+V0.13, first-gen Loongson-3).  Without this env var the binary will crash:
+
+```
+# SIGBUS (BUS_ADRALN) at pc=...
+# Problematic frame:
+# j  java.lang.Thread.<init>(...)V+21 java.base
+```
+
+This crash is identical in `-Xint` mode and with all compressed-oop variants; no JVM flag
+can avoid it.  The faulting instruction (decoded from the hs_err disassembly) is
+`lhu T1, 315(T3)` where T3 holds the `java.lang.Object` Klass -- offset 315 is odd and
+therefore inherently misaligned for a halfword load.  It is a genuine alignment quirk in
+the MIPS template interpreter that real hardware silently tolerates via the kernel trap
+handler.
 
 ### Real hardware test result -- glibc mismatch
 
@@ -456,8 +467,8 @@ requires the traditional `rm -rf /var/lib/apt/lists/*` instead.
 | jdk17u mips port compiles with GCC 12 (Bookworm) | yes (with `--disable-warnings-as-errors`) |
 | Build time, full (22-core x86-64) | 3m56s wall / 57m51s user |
 | Make target | `images` (`legacy-jre-image` saves no time -- identical compilation) |
-| JVM loads under QEMU user-mode | yes -- reaches Java-level `Thread.<init>` |
-| `java -version` completes under QEMU | no -- SIGBUS in interpreter (unaligned access) |
+| JVM loads under QEMU (default CPU) | yes -- reaches `Thread.<init>`, then SIGBUS |
+| `java -version` under QEMU (`QEMU_CPU=Loongson-3A1000`) | **yes** -- `openjdk 17.0.19-internal` |
 | `java -version` on real hardware (Bookworm build) | **yes** -- `openjdk 17.0.19-internal` |
 | Build host must be | `debian:bookworm-slim` (glibc 2.36, matches target) |
 
