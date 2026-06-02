@@ -653,7 +653,11 @@ void InterpreterRuntime::resolve_get_put(JavaThread* current, Bytecodes::Code by
   constantPoolHandle pool(current, last_frame.method()->constants());
   methodHandle m(current, last_frame.method());
 
-  resolve_get_put(bytecode, last_frame.get_index_u2(bytecode), m, pool, true /*initialize_holder*/, current);
+  // On little-endian platforms, the Rewriter stores field cache indices using
+  // Bytes::put_native_u2 (native byte order). Use get_native_u2 to read it back
+  // correctly, consistent with how the interpreter assembly reads it.
+  int field_index = Bytes::get_native_u2(last_frame.bcp() + 1);
+  resolve_get_put(bytecode, field_index, m, pool, true /*initialize_holder*/, current);
 }
 
 void InterpreterRuntime::resolve_get_put(Bytecodes::Code bytecode, int field_index,
@@ -717,6 +721,7 @@ void InterpreterRuntime::resolve_get_put(Bytecodes::Code bytecode, int field_ind
   entry->fill_in(info.field_holder(), info.offset(),
                  checked_cast<u2>(info.index()), checked_cast<u1>(state),
                  static_cast<u1>(get_code), static_cast<u1>(put_code));
+  // MIPS DEBUG: print what was stored + check expression stack
 }
 
 
@@ -821,7 +826,9 @@ void InterpreterRuntime::resolve_invoke(JavaThread* current, Bytecodes::Code byt
 
   methodHandle resolved_method;
 
-  int method_index = last_frame.get_index_u2(bytecode);
+  // On little-endian platforms, the Rewriter stores method cache indices using
+  // Bytes::put_native_u2 (native byte order). Use get_native_u2 to read it back correctly.
+  int method_index = Bytes::get_native_u2(last_frame.bcp() + 1);
   {
     JvmtiHideSingleStepping jhss(current);
     JavaThread* THREAD = current; // For exception macros.
@@ -941,7 +948,9 @@ void InterpreterRuntime::resolve_invokehandle(JavaThread* current) {
   // resolve method
   CallInfo info;
   constantPoolHandle pool(current, last_frame.method()->constants());
-  int method_index = last_frame.get_index_u2(bytecode);
+  // On little-endian platforms, the Rewriter stores method cache indices using
+  // Bytes::put_native_u2 (native byte order). Use get_native_u2 to read it back correctly.
+  int method_index = Bytes::get_native_u2(last_frame.bcp() + 1);
   {
     JvmtiHideSingleStepping jhss(current);
     JavaThread* THREAD = current; // For exception macros.
@@ -1461,7 +1470,7 @@ JRT_ENTRY(void, InterpreterRuntime::prepare_native_call(JavaThread* current, Met
   // preparing the same method will be sure to see non-null entry & mirror.
 JRT_END
 
-#if defined(IA32) || defined(AMD64) || defined(ARM) || defined(LOONGARCH64)
+#if defined(IA32) || defined(AMD64) || defined(ARM) || defined(LOONGARCH64) || defined(MIPS64)
 JRT_LEAF(void, InterpreterRuntime::popframe_move_outgoing_args(JavaThread* current, void* src_address, void* dest_address))
   assert(current == JavaThread::current(), "pre-condition");
   if (src_address == dest_address) {

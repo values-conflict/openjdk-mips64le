@@ -117,6 +117,7 @@
 #include "jfr/jfr.hpp"
 #endif
 
+
 // Initialization after module runtime initialization
 void universe_post_module_init();  // must happen after call_initPhase2
 
@@ -168,7 +169,6 @@ static void create_initial_thread(Handle thread_group, JavaThread* thread,
                           thread_group,
                           string,
                           CHECK);
-
   DEBUG_ONLY(int64_t main_thread_tid = java_lang_Thread::thread_id(thread_oop());)
   assert(main_thread_tid == ThreadIdentifier::initial(), "");
   assert(main_thread_tid == thread->monitor_owner_id(), "");

@@ -67,6 +67,13 @@ JVM_CFLAGS_TARGET_DEFINES += \
     -DHOTSPOT_LIB_ARCH='"$(OPENJDK_TARGET_CPU_LEGACY_LIB)"' \
     #
 
+# mips: GCC predefines _mips=1, which causes INCLUDE_SUFFIX_CPU to expand
+# to 1 instead of _mips via the PASTE_TOKENS chain.  Undefine it so that
+# _mips remains a plain identifier and resolves correctly to the suffix.
+ifeq ($(HOTSPOT_TARGET_CPU_ARCH), mips)
+  JVM_CFLAGS_TARGET_DEFINES += -U_mips
+endif
+
 ifeq ($(DEBUG_LEVEL), release)
   # release builds disable uses of assert macro from <assert.h>.
   JVM_CFLAGS_DEBUGLEVEL := -DNDEBUG

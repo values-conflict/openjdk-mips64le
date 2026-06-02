@@ -276,6 +276,23 @@ AC_DEFUN_ONCE([JVM_FEATURES_CHECK_DTRACE],
 ])
 
 ################################################################################
+# Check if the feature 'compiler1' is available on this platform.
+# mips64el has no C1 JIT -- only the template interpreter and C2.
+#
+AC_DEFUN_ONCE([JVM_FEATURES_CHECK_COMPILER1],
+[
+  JVM_FEATURES_CHECK_AVAILABILITY(compiler1, [
+    AC_MSG_CHECKING([if platform is supported by compiler C1])
+    if test "x$OPENJDK_TARGET_CPU" = "xmips64el"; then
+      AC_MSG_RESULT([no, $OPENJDK_TARGET_CPU])
+      AVAILABLE=false
+    else
+      AC_MSG_RESULT([yes])
+    fi
+  ])
+])
+
+################################################################################
 # Check if the feature 'jvmci' is available on this platform.
 #
 AC_DEFUN_ONCE([JVM_FEATURES_CHECK_JVMCI],
@@ -391,6 +408,7 @@ AC_DEFUN_ONCE([JVM_FEATURES_PREPARE_PLATFORM],
   # JVM_FEATURES_PLATFORM_UNAVAILABLE.
 
   JVM_FEATURES_CHECK_CDS
+  JVM_FEATURES_CHECK_COMPILER1
   JVM_FEATURES_CHECK_DTRACE
   JVM_FEATURES_CHECK_JVMCI
   JVM_FEATURES_CHECK_SHENANDOAHGC

@@ -1821,6 +1821,9 @@ void * os::dll_load(const char *filename, char *ebuf, int ebuflen) {
   static  Elf32_Half running_arch_code=EM_S390;
 #elif  (defined ALPHA)
   static  Elf32_Half running_arch_code=EM_ALPHA;
+#elif  (defined MIPS64)
+  // MIPS64el: little-endian MIPS64; use EM_MIPS with ELFDATA2LSB
+  static  Elf32_Half running_arch_code=EM_MIPS;
 #elif  (defined MIPSEL)
   static  Elf32_Half running_arch_code=EM_MIPS_RS3_LE;
 #elif  (defined PARISC)

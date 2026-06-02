@@ -508,7 +508,9 @@ static int __ieee754_rem_pio2(double x, double *y) {
  *              sin(x) = x + (S1*x + (x *(r-y/2)+y))
  */
 
-#if defined(LOONGARCH)
+#if defined(LOONGARCH) || defined(MIPS64)
+/* LOONGARCH/MIPS64 register files define S1-S8 as register aliases;
+   use #define to avoid conflict with the static const double declarations below */
 #define S1   -1.66666666666666324348e-01
 #define S2    8.33333333332248946124e-03
 #define S3   -1.98412698298579493134e-04

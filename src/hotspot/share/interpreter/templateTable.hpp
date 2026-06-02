@@ -29,6 +29,7 @@
 #include "memory/allStatic.hpp"
 #include "runtime/frame.hpp"
 #include "utilities/macros.hpp"
+class ResolvedFieldEntry;
 
 #ifndef ZERO
 // All the necessary definitions used for (bytecode) template generation. Instead of
