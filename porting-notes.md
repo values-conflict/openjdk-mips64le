@@ -655,3 +655,181 @@ Files in jdk17u mips that don't exist in jdk11u (added between JDK 11 and JDK 17
 - `gc/shared/modRefBarrierSetAssembler_mips.{cpp,hpp}` -- modref barrier refactor
 
 Use jdk17u as the porting base, not jdk11u.
+
+---
+
+## Phase 1 -- Port jdk25u mips64el (interpreter-only, no C2)
+
+### Phase 1 summary
+
+| Objective | Result |
+| --- | --- |
+| jdk25u mips port compiles with GCC 12 (Bookworm) | **yes** (with `--disable-warnings-as-errors`) |
+| All shared runtime stubs generate without crash | **yes** |
+| JVM starts and loads Java classes | **yes** |
+| `java --version` on real Loongson-3 hardware | **yes** |
+| `java /tmp/T.java` (source launcher, invokedynamic) | **yes** -- "hello 42 world: mips64el" |
+| `java /tmp/M.java` (HashMap, lambdas) | **yes** -- "3" |
+| `java /tmp/S.java` (Thread, synchronized) | **yes** -- "1" |
+| `java -jar jenkins-agent.jar --help` | **yes** -- exit 0 |
+| Build script | `build-jdk.sh tianon-jdk25u-mips64` |
+| QEMU local testing | `QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 ./bin/java ...` |
+
+### Key bugs fixed during Phase 1 porting
+
+**1. `internal_pc_type` → `internal_word_type` in `generate_resolve_blob` and deopt stubs**
+
+jdk17u used `relocate(relocInfo::internal_pc_type)` before `patchable_set48(AT, save_pc)` calls
+in several functions in `sharedRuntime_mips_64.cpp`. In jdk25u, `internal_pc_type` was removed;
+the replacement is `internal_word_type`. Our initial port mistakenly used `runtime_call_type`,
+which caused `pd_call_destination` to be called on a `lui AT` (metadata store) instruction and
+crash with `ShouldNotReachHere`. Five instances in: `generate_native_wrapper`, `generate_deopt_blob`
+(×2), `generate_uncommon_trap_blob`, and `generate_resolve_blob`.
+
+Affected lines: 1875, 2472, 2645, 2726, 3050 of `sharedRuntime_mips_64.cpp`.
+
+**2. `OPT_THREAD` missing**
+
+jdk17u defines `#define OPT_THREAD 1` in `register_mips.hpp`, telling the JVM that the
+Java thread pointer is always in TREG (S6) so `get_thread()` is a no-op (just reads TREG).
+Our jdk25u port omitted this. Without `OPT_THREAD`, every `get_thread()` call saved all
+registers, called `Thread::current()`, and restored all registers -- ~70 instructions per call.
+With 3 calls in `generate_resolve_blob`, the instruction section overflowed the CodeBuffer
+(2196 bytes generated vs 2080-byte capacity). Fix: add `#define OPT_THREAD 1` to
+`register_mips.hpp` adjacent to the `constexpr Register TREG = S6` declaration.
+
+**3. `StubGenerator_generate` blob ID mapping**
+
+Our initial port called `generate_all()` for both `compiler_id` and `final_id` blob phases,
+generating arraycopy stubs (each containing `UnsafeMemoryAccessMark`) twice. The
+`UnsafeMemoryAccess` global table had capacity 2 but received 4 insertions. Fix: map only
+`final_id` to `generate_all()` and increase table capacity to 4 in `StubGenerator_generate`.
+
+**4. `remove_activation` return address (T3 → RA)**
+
+jdk17u's `remove_activation(state, Register ret_addr, ...)` loaded the frame's return address
+into the `ret_addr` parameter register. Our jdk25u port dropped that parameter, instead loading
+the return address into RA at the end of `remove_activation` (line 858 of
+`interp_masm_mips_64.cpp`). But the caller in `templateInterpreterGenerator_mips.cpp` still
+used T3 (which at that point holds the frame's monitor-block boundary address, NOT the return
+address). Fix: change `push2(T0, T3)` and `move(A1, T3)` to `push2(T0, RA)` and `move(A1, RA)`
+at the `exception_handler_for_return_address` call site in `generate_remove_activation_entry`.
+
+Symptom: `SharedRuntime::raw_exception_handler_for_return_address` received a stack address
+instead of a code address → `ShouldNotReachHere` at `relocInfo_mips.cpp:596`.
+
+**5. `ThreadStackSize` too small for jdk25u initialization**
+
+jdk17u uses ~700KB of the 1MB default thread stack during JVM initialization. jdk25u uses
+~916KB (due to deeper initialization: Loom, JFR, new CP cache infrastructure), which exceeds
+the ~896KB effective limit (1MB minus 80KB shadow zone plus guards). This caused
+`StackOverflowError` during `Throwable` class initialization, producing an infinite NPE
+recursion in `Throwable.<init>` → `NullPointerException.<init>` → ... Fix: increase
+`ThreadStackSize` and `VMThreadStackSize` from 1024KB to 2048KB in
+`src/hotspot/os_cpu/linux_mips/globals_linux_mips.hpp`. This matches what RISC-V uses.
+
+### Additional bugs fixed during hardware testing (2026-06-02)
+
+**6. TOS state extracted from wrong field in `load_invoke_cp_cache_entry`**
+
+JDK-8302708 split `_flags` and `_tos_state` into separate bytes in `ResolvedMethodEntry`.  The
+MIPS port loaded `flags_offset()` into `flags` and then did `dsrl(flags, flags, tos_state_shift=28)`
+to extract the TOS state.  Since `_flags` is only 8 bits, shifting right by 28 always gives 0, so
+every invoke returned through the itos entry.  Fix: after loading `flags`, also load `type_offset()`
+(`_tos_state`) into AT, shift it left by 28, and OR it into `flags`.
+
+**7. `invokevirtual` vtable index vs Method***
+
+`load_invoke_cp_cache_entry` with `is_invokevirtual=true` always loaded `method_offset()` into
+`method`.  Non-final virtuals need the vtable index from `table_index_offset()`; only vfinal calls
+use the Method*.  Fix: branch on `is_vfinal` at runtime; load `table_index_offset()` for non-final.
+
+**8. `invokeinterface` klass/method registers swapped**
+
+For `invokeinterface`, T2 (`method`) should receive the interface klass from `klass_offset()` and
+Rmethod (`itable_index`) should receive the Method* from `method_offset()` -- not the other way
+around as the original code had it.  For forced-virtual (Object methods via interface), Rmethod
+instead gets the vtable index or Method* based on `is_vfinal`.
+
+**9. `invokehandle` caught by `invokeinterface` branch**
+
+Both `invokeinterface` and `invokehandle` pass `itable_index != NOREG`, so the `else if
+(itable_index != NOREG)` branch in `load_invoke_cp_cache_entry` was applying the invokeinterface
+klass/method logic to `invokehandle`, which is wrong.  Fix: gate the invokeinterface branch on
+`bytecode() == Bytecodes::_invokeinterface`; the else branch then handles invokehandle by loading
+Method* into `method` and `resolved_references_index` into `itable_index`.
+
+**10. Three `invokedynamic` bugs**
+
+*a. Wrong `has_appendix` bit.*  `ResolvedIndyEntry::has_appendix_shift = 1` (bit 1), but
+`prepare_invoke` was checking `(1 << ResolvedMethodEntry::has_appendix_shift)` = bit 3.  The
+appendix (MethodType or CallSite) was never pushed; lambdas returned null; NPE at boot layer init.
+
+*b. `resolved_references_index` not loaded.*  `itable_index` (T2_callsite) was not loaded from
+`ResolvedIndyEntry::resolved_references_index_offset()` before `load_resolved_reference_at_index`
+used it, so the appendix lookup used a stale register.
+
+*c. Wrong return entry for invokedynamic.*  `generate_return_entry_for` used `load_method_entry`
+(reads a 2-byte method index) to advance SP for invokedynamic returns.  invokedynamic uses a
+4-byte operand and `load_resolved_indy_entry` instead.  Wrong SP advance left the int argument on
+the stack; GC later found the integer as a garbage oop.
+
+**11. `invokedynamic` resolution check missing**
+
+When first executed, the `ResolvedIndyEntry._method` is null.  The port jumped directly to
+`jump_from_interpreted(null)` without calling `InterpreterRuntime::resolve_from_cache`.  Fix: add
+`bne(method, R0, resolved); call_VM(resolve_from_cache, _invokedynamic)` before the dispatch, with
+a reload after the call (call_VM clobbers T1-T9).
+
+**12. `get_cache_index_at_bcp` for sizeof(u4) decoded with old JDK 17 `~index` formula**
+
+In JDK 17, the Rewriter stored `~indy_index` in the `invokedynamic` bytecode operand.  JDK 25
+stores the index directly (`Bytes::put_native_u4(p, (u2)_invokedynamic_index)`).  The MIPS port
+still applied `nor(index, index, R0); sll(index, index, 0)` to "decode" the value, turning index 0
+into -1, then `dsll(-1, 4) = -16`, then `daddu(array+8, -16) = array-8`, pointing the entry
+pointer 16 bytes before the first actual entry.  Fix: remove the nor/sll decode.
+
+**13. `_flags` field in `ResolvedIndyEntry` at odd byte offset**
+
+`ResolvedIndyEntry` layout: `Method*(8), u2(8), u2(10), u2(12), u1(14), u1 _flags(15)`.
+Using `lhu` at offset 15 is a 2-byte access to an odd address → SIGBUS/SEGV on strict-alignment
+MIPS.  Fix: use `lbu` (single-byte load).
+
+**14. LM_LIGHTWEIGHT locking fast path used JDK 17 stack-locking code**
+
+`lock_object` and `unlock_object` had an inline fast path for `LM_LIGHTWEIGHT` that implemented
+the JDK 17 "displaced header" protocol, which is invalid in JDK 25.  Fix: always call the
+runtime (`InterpreterRuntime::monitorenter` / `monitorexit`), which correctly handles the current
+protocol.
+
+**15. Interpreter locals pointer stored as absolute address; JDK 25 expects word-offset from FP**
+
+`frame::interpreter_frame_locals()` reads the frame slot at `interpreter_frame_locals_offset` as
+a signed integer `n` and returns `&fp()[n]` = `FP + n*8`.  The MIPS port stored `LVP` (an absolute
+stack address) there; the correct value is `(LVP - FP) / wordSize`.  The GC computed garbage locals
+addresses, called `do_oop` on them, and crashed.  Fix: store `(LVP - FP) / wordSize` in
+`generate_fixed_frame`; decode back in `restore_locals()` as `FP + n*wordSize`.
+
+### QEMU user-mode test status (2026-06-02)
+
+Use `QEMU_CPU=Loongson-3A1000` and `QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64` for all
+QEMU testing -- see the Phase 0 QEMU section for the full explanation.  With the Loongson
+CPU model, QEMU emulates the unaligned-access trap handler, matching real hardware behaviour.
+Any crash with `QEMU_CPU=Loongson-3A1000` reflects a genuine interpreter or runtime bug.
+
+All Phase 1 target tests pass locally under QEMU and on real Loongson-3 hardware:
+
+```bash
+QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  build/linux-mips64el-server-release/images/jdk/bin/java --version
+QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  build/linux-mips64el-server-release/images/jdk/bin/java /tmp/T.java
+```
+
+### Remaining work
+
+- Phase 2: implement Loom continuation stubs (`gen_continuation_enter`,
+  `gen_continuation_yield`) in `sharedRuntime_mips_64.cpp`; re-enable `VMContinuations`.
+  Currently disabled via `globals_mips.hpp`: `define_pd_global(bool, VMContinuations, false)`.
+- Phase 3: implement `mips.ad` / `mips_64.ad` for C2 JIT (requires AD file authoring)
+- Phase 4: Panama FFI (`ForeignGlobals`, `DowncallLinker`, `UpcallLinker`)

@@ -63,6 +63,36 @@ RUN set -eux; \
 	[ "$symbolsStubActual" = "$symbolsStubExpect" ]; \
 	rm /tmp/alsa-stub.c
 
+RUN set -eux; \
+# x11 stubs: mips64el shared libs satisfying configure's X11 link tests
+# (real X11 is dlopen'd at runtime; these stubs are never deployed)
+	mkdir --parents /opt/x11-stub/X11; \
+	printf '%s\n' \
+		'/* stub Intrinsic.h for mips64el cross-build configure check */' \
+		'#ifndef _INTRINSIC_H' \
+		'#define _INTRINSIC_H' \
+		'typedef void *Widget;' \
+		'typedef void *XtAppContext;' \
+		'void XtToolkitInitialize(void);' \
+		'#endif' \
+		> /opt/x11-stub/X11/Intrinsic.h \
+	; \
+	printf '%s\n' \
+		'void XrmInitialize(void){}' \
+		'void XQueryExtension(void){}' \
+		'void XRenderQueryExtension(void){}' \
+		'void XTestQueryExtension(void){}' \
+		'void XRRQueryExtension(void){}' \
+		'void XtToolkitInitialize(void){}' \
+		'void XShapeQueryExtension(void){}' \
+		> /tmp/x11stub.c \
+	; \
+	for lib in X11 Xext Xrender Xi Xrandr Xtst Xt; do \
+		mips64el-linux-gnuabi64-gcc -shared -fPIC \
+			-o "/opt/x11-stub/lib${lib}.so" /tmp/x11stub.c; \
+	done; \
+	rm /tmp/x11stub.c
+
 COPY --from=jdk17 /opt/java/openjdk /opt/java/jdk17
 COPY --from=jdk25 /opt/java/openjdk /opt/java/jdk25
 RUN /opt/java/jdk17/bin/java --version && /opt/java/jdk25/bin/java --version

@@ -140,20 +140,20 @@ Build host must be `debian:bookworm-slim` -- Trixie's glibc 2.40 cross-compiler 
 produces `__isoc23_sscanf@GLIBC_2.38` references that are absent on the target's glibc 2.36.
 See `porting-notes.md` Phase 0 section for the full configure command and all workarounds.
 
-1. **obtain QEMU full system or real hardware** -- QEMU user-mode cannot complete `java
-   -version` due to missing kernel unaligned-access emulation.  A Debian mips64el QEMU
-   system image or a real Loongson 3A/3B machine is the next testing blocker.
+**Phase 1 complete (2026-06-02).**  jdk25u mips64el interpreter-only port passes all
+target workload tests on real Loongson-3 hardware: `java --version`, string concatenation
+(`invokedynamic`), HashMap, synchronized threads, and `jenkins-agent.jar --help` all exit 0.
+Use `QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64` for local QEMU
+testing (the Loongson CPU model emulates unaligned-access handling, matching hardware).
+See `porting-notes.md` Phase 1 section for the full list of bugs found and fixed.
 
-2. **produce the full loongarch delta** -- diff jdk17u loongarch vs jdk25u loongarch for
-   each key file to get the exact API change guide for the forward port.
-   See the "Diff a file between the two eras" command in `porting-notes.md`.
+1. **connect jenkins-agent to a real Jenkins controller** -- run the agent with `-jnlpUrl`
+   and `-secret` against a Jenkins instance to validate the full remoting workflow under GC.
 
-3. **verify icBuffer / depChecker removal** -- confirm neither has a jdk25u equivalent:
-   `git -C jdk25u ls-tree -r HEAD src/hotspot/cpu/loongarch/ | grep -i 'icbuf\|depcheck'`
+2. **fix Loom stubs** -- `VMContinuations=false` disables virtual threads.  The
+   `gen_continuation_enter` and `gen_continuation_yield` stubs are not yet implemented for
+   MIPS; follow the LoongArch pattern in `sharedRuntime_loongarch_64.cpp`.
 
-4. **verify SA removal** -- confirm `jdk.hotspot.agent` is gone in jdk25u:
-   `git -C jdk25u ls-tree --name-only -r HEAD | grep hotspot.agent`
-
-5. **note on `jdk17_35`** -- the origin of this version string is unclear; it does not
+3. **note on `jdk17_35`** -- the origin of this version string is unclear; it does not
    correspond to any tag in these repos or any known public fork. Treat it as unresolvable
    and use jdk17u `master-ls` HEAD as the mips64le reference instead.
