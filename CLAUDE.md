@@ -118,6 +118,21 @@ the uname shim.
 Output: `$src/build/linux-mips64el-server-release/images/jdk/`
 Build log: `$src/build/linux-mips64el-server-release/build.log`
 
+**Build process notes for LLMs running builds:**
+
+- The build script always runs `configure` first. The incremental build correctly tracks
+  changed files; `make clean` is NOT needed between builds.
+- After every successful build, the output JDK at
+  `tianon-jdk25u-mips64/build/linux-mips64el-server-release/images/jdk/`
+  must be **deployed to the real Loongson-3 hardware** (the `test-jdk25/` directory)
+  before hardware tests are meaningful. The LLM cannot do this deployment; remind Tianon
+  to copy/sync the new JDK to the hardware after each build that fixes hardware-visible bugs.
+- To verify the build actually compiled a changed shared file, compare timestamps:
+  `stat -c '%Y %n' build/.../objs/FileName.o src/hotspot/share/runtime/FileName.cpp`
+  The `.o` should be NEWER than the `.cpp`. If equal or older, touch the source first.
+- When modifying `src/hotspot/share/runtime/continuation*.cpp` or `.hpp` (shared files),
+  verify the rebuild with: `stat -c '%Y' build/.../objs/continuation.o` before and after.
+
 ### `porting-notes.md`
 
 Living document -- update this as porting or archaeology work progresses. The reference
@@ -147,13 +162,18 @@ Use `QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64` for l
 testing (the Loongson CPU model emulates unaligned-access handling, matching hardware).
 See `porting-notes.md` Phase 1 section for the full list of bugs found and fixed.
 
+**Phase 2 complete (2026-06-04).**  All 5 Phase2Test cases pass on real Loongson-3 hardware:
+single VT yield, yield+resume, multiple yields, parkNanos, and 5 concurrent yielding VTs.
+Key additional bugs found and fixed beyond the initial stubs: `fast=false` for freeze (MIPS
+interpreter frames not compatible with fast freeze path), stale `FP[-9]` (initial_sp /
+monitor_block_top) after thaw causing `IllegalMonitorStateException` from `remove_activation`,
+`push/pop_cont_fastpath` semantics corrected, LM_LEGACY removed (LM_LIGHTWEIGHT works).
+See `porting-notes.md` Phase 2 section for full details.
+
 1. **connect jenkins-agent to a real Jenkins controller** -- run the agent with `-jnlpUrl`
    and `-secret` against a Jenkins instance to validate the full remoting workflow under GC.
+   This is the original Phase 2 target workload.
 
-2. **fix Loom stubs** -- `VMContinuations=false` disables virtual threads.  The
-   `gen_continuation_enter` and `gen_continuation_yield` stubs are not yet implemented for
-   MIPS; follow the LoongArch pattern in `sharedRuntime_loongarch_64.cpp`.
-
-3. **note on `jdk17_35`** -- the origin of this version string is unclear; it does not
+2. **note on `jdk17_35`** -- the origin of this version string is unclear; it does not
    correspond to any tag in these repos or any known public fork. Treat it as unresolvable
    and use jdk17u `master-ls` HEAD as the mips64le reference instead.
