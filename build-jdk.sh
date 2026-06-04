@@ -33,9 +33,6 @@ export PATH="/usr/local/bin:$PATH"
 
 cd "$src"
 
-# Note: after configure, a custom-spec.gmk is written to exclude jdk.hotspot.agent
-# (no MIPS SA native code; not needed for the Jenkins remoting target).
-
 args=(
 	# target + toolchain
 	--openjdk-target=mips64el-linux-gnuabi64
@@ -73,21 +70,12 @@ args=(
 
 )
 
-# Pass --with-jvm-features only when jvm-features.m4 has mips64el-specific
-# handling (our jdk25u additions).  In jdk17u the features file uses the
-# broader "mips" arch and doesn't properly gate C2 compilation when the flag
-# is passed, so we skip it there and let platform checks handle exclusions.
+# Remove when Phase 3 (C2 JIT) is complete.
 if grep -q 'mips64el' make/autoconf/jvm-features.m4 2>/dev/null; then
-	args+=( --with-jvm-features=-compiler2,-zgc,-shenandoahgc )
+	args+=( --with-jvm-features=-compiler2 )
 fi
 
 bash ./configure "${args[@]}"
-
-# Exclude jdk.hotspot.agent: no MIPS SA native code; not needed for Jenkins target.
-specgmk="build/linux-mips64el-server-release/custom-spec.gmk"
-if [ ! -f "$specgmk" ] || ! grep -qF 'jdk.hotspot.agent' "$specgmk"; then
-	printf 'MODULES_FILTER += jdk.hotspot.agent\n' >> "$specgmk"
-fi
 
 { time gmake CONF=release images; } \
 	2>&1 | tee build/linux-mips64el-server-release/build.log

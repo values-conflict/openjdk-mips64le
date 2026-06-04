@@ -197,8 +197,8 @@ Files to prioritize for the delta: `templateInterpreterGenerator_loongarch.cpp`,
 ## New Files Needed for a jdk25u mips64 Port
 
 Files in jdk25u loongarch with no mips equivalent -- need to be written for any complete
-mips64 jdk25u port. Phase 1 (interpreter + C2) can disable most of these; they become
-relevant in later phases.
+mips64 jdk25u port. Most were deferred past Phase 1 (interpreter-only) and Phase 2 (Loom);
+see the Phase column for when each becomes relevant.
 
 | Category | Phase | Key files |
 | --- | --- | --- |
@@ -207,11 +207,11 @@ relevant in later phases.
 | `c2_CodeStubs` | 1 | `c2_CodeStubs_mips.cpp` |
 | `stubDeclarations` | 1 | `stubDeclarations_mips.hpp` |
 | `vmstorage` | 1 | `vmstorage_mips.hpp` |
-| C1 JIT | 2 (13 files) | Adapt from jdk17u loongarch C1 (see below) |
-| Shenandoah | 3 | 3 files in `gc/shenandoah/` |
-| ZGC | 3 | 7 files in `gc/z/` + `gc/x/` |
+| C1 JIT | 6 (13 files) | Adapt from jdk17u loongarch C1 (see below) |
+| Shenandoah | 5 | 3 files in `gc/shenandoah/` |
+| ZGC | 5 | 7 files in `gc/z/` + `gc/x/` |
 | G1 JIT rules | 3 | `gc/g1/g1_mips.ad` |
-| Panama FFI | 3 | `downcallLinker_mips_64.cpp`, `upcallLinker_mips_64.cpp` |
+| Panama FFI | 4 | `downcallLinker_mips_64.cpp`, `upcallLinker_mips_64.cpp` |
 | JVMCI | optional | `jvmciCodeInstaller_mips.cpp` |
 | Crypto intrinsics | optional | `macroAssembler_mips_chacha.cpp`, `macroAssembler_mips_trig.cpp` |
 
@@ -1020,3 +1020,76 @@ Additional bugs fixed in the second debugging cycle (freeze/thaw deep dive):
   LM_LIGHTWEIGHT modes from the stale `FP[-9]` bug above. After fixing that root cause, the
   default LM_LIGHTWEIGHT mode works correctly. The LM_LEGACY override in `vm_version_mips.cpp`
   was removed.
+
+---
+
+## Phase 3 -- C2 JIT
+
+**Status: in progress (2026-06-04).**
+
+### Build system cleanup (completed before Phase 3 C2 work)
+
+Phase 3 enabled C2 by removing `-compiler2` from `build-jdk.sh`'s `--with-jvm-features` flag.
+Once that flag was gone, the remaining flags (`-zgc`, `-shenandoahgc`) were left over -- and on
+inspection they were always redundant: `JVM_FEATURES_CHECK_ZGC` and
+`JVM_FEATURES_CHECK_SHENANDOAHGC` in `jvm-features.m4` already mark mips64el as unsupported
+(it is absent from both checks' supported-architecture lists and falls through to
+`AVAILABLE=false` automatically).  The entire `--with-jvm-features` block was removed from
+`build-jdk.sh`; `./configure` produces the correct feature set without it.
+
+Similarly, `jdk-options.m4` already has a proper `INCLUDE_SA=false` mechanism (used for s390x
+and AIX) that propagates through `Modules.gmk` to exclude `jdk.hotspot.agent` automatically.
+Adding mips64el to that block (after the existing s390x check) made the `custom-spec.gmk`
+post-configure patch in `build-jdk.sh` redundant; it was removed.
+
+Both of these should have been done in Phase 1 alongside the other `jvm-features.m4` and
+`jdk-options.m4` scaffolding.  The `-c1` flag in early Phase 1 configure notes was equally
+redundant -- `JVM_FEATURES_CHECK_COMPILER1` already explicitly excludes mips64el.  All three
+`--with-jvm-features` flags and the `custom-spec.gmk` workaround were written defensively,
+without checking whether the build system already handled them.
+
+---
+
+## Phase 4 -- Panama FFI
+
+**Status: not started.**
+
+### Panama FFI files
+
+Two files needed (see "New Files Needed" table):
+
+- `downcallLinker_mips_64.cpp` -- adapt from `downcallLinker_loongarch_64.cpp`
+- `upcallLinker_mips_64.cpp` -- adapt from `upcallLinker_loongarch_64.cpp`
+
+Not relevant to the Jenkins remoting target (pure Java, no native call sites in user code).
+
+---
+
+## Phase 5 -- ZGC and Shenandoah
+
+**Status: not started.**
+
+Low priority for the Jenkins remoting target: G1 (already enabled and working) is sufficient
+for expected heap sizes.  Implement when broader platform completeness is desired.
+
+Seven ZGC files and three Shenandoah files needed; see "New Files Needed" table.  Note:
+`JVM_FEATURES_CHECK_ZGC` and `JVM_FEATURES_CHECK_SHENANDOAHGC` already exclude mips64el --
+enabling these GCs requires implementing the files and adding mips64el to the respective
+supported-architecture lists in `jvm-features.m4`; no configure flag change is needed.
+
+---
+
+## Phase 6 -- C1 JIT
+
+**Status: not started.**
+
+mips64le has no C1 in jdk17u -- the Loongson port skipped it entirely.  LoongArch has a full
+C1 (16 files in jdk17u, 13 in jdk25u).  See "C1 Files Reference" above for the file list.
+
+Low priority for the Jenkins remoting target: C1 improves startup time and warm-up latency,
+which matter less for a long-running server agent than for command-line tools.  C2 (Phase 3)
+covers sustained throughput.
+
+Start from **jdk17u's loongarch C1** (closer in API surface to what the mips port needs),
+then apply the jdk17u→jdk25u loongarch C1 delta.  When the implementation is complete, remove
+the mips64el exclusion from `JVM_FEATURES_CHECK_COMPILER1` in `jvm-features.m4`.

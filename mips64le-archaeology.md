@@ -189,6 +189,14 @@ Initial commit: `f56d7f29f49` (2023-01-31, same day as jdk17u, author `loongson-
 
 ### Q3: Shortest realistic path to mips64le in jdk25u
 
+> **Note (2026-06-04):** The phase plan below is the initial planning snapshot from the
+> 2026-05-30 archaeology session.  It does not reflect what actually happened.  Key
+> divergences: Phase 1 originally bundled interpreter + C2 together; in practice C2 became
+> its own Phase 3 because Loom/continuations (entirely absent from this plan) had to land
+> first as Phase 2.  C1 slipped from Phase 2 to Phase 6.  ZGC, Shenandoah, and Panama were
+> renumbered to Phases 5 and 4 respectively.  **For the current phase plan, see
+> `porting-notes.md`.**  This section is retained as historical record only.
+
 A **hybrid forward-port** in phases. See `porting-notes.md` for the file mapping, build commands, and Phase 0 detail.
 
 **Phase 0 -- build jdk17u mips64el and establish baseline (1-2 days):**
