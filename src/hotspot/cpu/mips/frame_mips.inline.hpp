@@ -43,6 +43,7 @@ inline frame::frame() {
   _unextended_sp = nullptr;
   _fp = nullptr;
   _cb = nullptr;
+  _oop_map = nullptr;
   _deopt_state = unknown;
 }
 
@@ -51,6 +52,7 @@ inline void frame::init(intptr_t* sp, intptr_t* fp, address pc) {
   _unextended_sp = sp;
   _fp = fp;
   _pc = pc;
+  _oop_map = nullptr;
   assert(pc != nullptr, "no pc?");
   _cb = CodeCache::find_blob(pc);
   adjust_unextended_sp();
@@ -73,6 +75,7 @@ inline frame::frame(intptr_t* sp, intptr_t* unextended_sp, intptr_t* fp, address
   _unextended_sp = unextended_sp;
   _fp = fp;
   _pc = pc;
+  _oop_map = nullptr;
   assert(pc != nullptr, "no pc?");
   _cb = CodeCache::find_blob(pc);
   adjust_unextended_sp();
@@ -92,6 +95,7 @@ inline frame::frame(intptr_t* sp, intptr_t* unextended_sp, intptr_t* fp, address
   _fp = fp;
   _pc = pc;
   _cb = cb;
+  _oop_map = nullptr;
   assert(_cb != nullptr, "must have codeblob");
   setup(pc);
 }
@@ -130,6 +134,7 @@ inline frame::frame(intptr_t* sp, intptr_t* fp) {
   _unextended_sp = sp;
   _fp = fp;
   _pc = (address)(sp[-1]);
+  _oop_map = nullptr;
 
   // Here's a sticky one. This constructor can be called via AsyncGetCallTrace
   // when last_Java_sp is non-null but the pc fetched is junk. If we are truly
@@ -198,7 +203,9 @@ inline intptr_t*    frame::sender_sp()        const { return            addr_at(
 
 
 inline intptr_t* frame::interpreter_frame_last_sp() const {
-  return *(intptr_t**)addr_at(interpreter_frame_last_sp_offset);
+  // Stored as a signed word-offset from fp(); 0 means null (no last_sp set).
+  intptr_t n = *addr_at(interpreter_frame_last_sp_offset);
+  return n != 0 ? &fp()[n] : nullptr;
 }
 
 inline intptr_t* frame::interpreter_frame_bcp_addr() const {

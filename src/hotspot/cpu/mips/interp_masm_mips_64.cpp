@@ -514,9 +514,11 @@ void InterpreterMacroAssembler::store_ptr(int n, Register val) {
 // in this thread in which case we must call the i2i entry
 void InterpreterMacroAssembler::jump_from_interpreted(Register method) {
   Register temp = T9;
-  // record last_sp
+  // record last_sp as word-offset from FP (so at_relative() and freeze/thaw can decode it)
   move(Rsender, SP);
-  sd(SP, FP, frame::interpreter_frame_last_sp_offset * wordSize);
+  dsubu(AT, SP, FP);
+  dsra(AT, AT, LogBytesPerWord);
+  sd(AT, FP, frame::interpreter_frame_last_sp_offset * wordSize);
 
   if (JvmtiExport::can_post_interpreter_events()) {
     Label run_compiled_code;

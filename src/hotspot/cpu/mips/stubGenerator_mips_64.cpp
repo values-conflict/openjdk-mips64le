@@ -35,6 +35,8 @@
 #include "oops/objArrayKlass.hpp"
 #include "oops/oop.inline.hpp"
 #include "prims/methodHandles.hpp"
+#include "runtime/continuation.hpp"
+#include "runtime/continuationEntry.inline.hpp"
 #include "runtime/frame.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/sharedRuntime.hpp"
@@ -2648,6 +2650,209 @@ class StubGenerator: public StubCodeGenerator {
     // throw_*_entry stubs are now initialized by SharedRuntime in jdk25u
   }
 
+#undef __
+#define __ _masm->
+
+  // ─── Loom continuation stubs ───────────────────────────────────────────────
+  //
+  // generate_cont_thaw(kind): thaw continuation frames onto the current stack.
+  //   Continuation::prepare_thaw() returns the number of bytes needed.
+  //   Continuation::thaw_entry() returns the sp of the yielding frame.
+  //   On return we restore the yielding frame and either:
+  //     - jump to it (thaw_top / return_barrier), or
+  //     - deliver a pending exception (return_barrier_exception).
+  //
+  // MIPS-specific note: enter() sets FP=SP (not FP=SP+16 as in LoongArch),
+  // so FP is restored as (sp_of_yielding_frame - 2*wordSize), not the LoongArch
+  // value which is (sp_of_yielding_frame).
+
+  address generate_cont_thaw(Continuation::thaw_kind kind) {
+    bool return_barrier           = Continuation::is_thaw_return_barrier(kind);
+    bool return_barrier_exception = Continuation::is_thaw_return_barrier_exception(kind);
+
+    address start = __ pc();
+
+    if (return_barrier) {
+      __ ld(SP, Address(TREG, JavaThread::cont_entry_offset()));
+    }
+
+#ifndef PRODUCT
+    {
+      Label OK;
+      __ ld(AT, Address(TREG, JavaThread::cont_entry_offset()));
+      __ beq(SP, AT, OK);
+      __ delayed()->nop();
+      __ stop("incorrect sp before prepare_thaw");
+      __ bind(OK);
+    }
+#endif
+
+    if (return_barrier) {
+      // Preserve possible integer/float return value across the prepare_thaw call.
+      __ daddiu(SP, SP, -2 * wordSize);
+      __ sdc1(F0, Address(SP, 0 * wordSize));
+      __ sd(V0, Address(SP, 1 * wordSize));
+    }
+
+    __ move(c_rarg1, return_barrier ? 1 : 0);
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, Continuation::prepare_thaw), TREG, c_rarg1);
+    // V0 = number of bytes to allocate for thawed frames, or 0 on overflow.
+    __ move(T8, V0);
+
+    if (return_barrier) {
+      __ ld(V0, Address(SP, 1 * wordSize));
+      __ ldc1(F0, Address(SP, 0 * wordSize));
+      __ daddiu(SP, SP, 2 * wordSize);
+    }
+
+#ifndef PRODUCT
+    {
+      Label OK;
+      __ ld(AT, Address(TREG, JavaThread::cont_entry_offset()));
+      __ beq(SP, AT, OK);
+      __ delayed()->nop();
+      __ stop("incorrect sp after prepare_thaw");
+      __ bind(OK);
+    }
+#endif
+
+    Label thaw_success;
+    __ bne(T8, R0, thaw_success);
+    __ delayed()->nop();
+    __ jmp(SharedRuntime::throw_StackOverflowError_entry(), relocInfo::runtime_call_type);
+    __ delayed()->nop();
+    __ bind(thaw_success);
+
+    // Make room for thawed frames.
+    __ dsubu(SP, SP, T8);
+    __ dins(SP, R0, 0, 4);   // 16-byte align
+
+    if (return_barrier) {
+      __ daddiu(SP, SP, -2 * wordSize);
+      __ sdc1(F0, Address(SP, 0 * wordSize));
+      __ sd(V0, Address(SP, 1 * wordSize));
+    }
+
+    __ move(c_rarg1, (int)kind);
+    __ call_VM_leaf(Continuation::thaw_entry(), TREG, c_rarg1);
+    // V0 = sp of the yielding (top) frame.
+    __ move(T8, V0);
+
+    if (return_barrier) {
+      __ ld(V0, Address(SP, 1 * wordSize));
+      __ ldc1(F0, Address(SP, 0 * wordSize));
+      __ daddiu(SP, SP, 2 * wordSize);
+    } else {
+      __ move(V0, R0);  // return 0 (success) from doYield
+    }
+
+    // We are now on the yielding frame.  In MIPS, enter() set FP=SP (at the
+    // saved-register block), so the block is 2 words BELOW the frame sp.
+    //   T8         = sp_of_frame  (bottom of frame content)
+    //   T8 - 8     = saved RA     (return PC, set by patch_pc)
+    //   T8 - 16    = saved FP     (link, set by push_pd)
+    // Set FP = T8 - 16 so that leave() (move SP,FP; pop2 RA,FP) reads correctly.
+    __ daddiu(FP, T8, -2 * wordSize);
+
+    if (return_barrier_exception) {
+      __ ld(c_rarg1, Address(FP, 1 * wordSize));  // return PC = FP+8 = T8-8
+      __ verify_oop(V0);
+      __ move(TSR, V0);   // save exception oop (V0 at this point)
+      __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::exception_handler_for_return_address),
+                      TREG, c_rarg1);
+      __ move(T8, V0);    // T8 = exception handler
+      __ move(V0, TSR);   // restore exception oop
+      __ verify_oop(V0);
+      __ move(A0, V0);    // A0 = exception oop for handler
+      __ leave();
+      __ move(A1, RA);    // A1 = exception pc
+      __ jr(T8);
+      __ delayed()->nop();
+    } else {
+      // Normal return: jump into the thawed frame's continuation point.
+      __ leave();
+      __ jr(RA);
+      __ delayed()->nop();
+    }
+
+    return start;
+  }
+
+  address generate_cont_thaw() {
+    if (!Continuations::enabled()) return nullptr;
+    StubGenStubId stub_id = StubGenStubId::cont_thaw_id;
+    StubCodeMark mark(this, stub_id);
+    address start = __ pc();
+    generate_cont_thaw(Continuation::thaw_top);
+    return start;
+  }
+
+  address generate_cont_returnBarrier() {
+    if (!Continuations::enabled()) return nullptr;
+    StubGenStubId stub_id = StubGenStubId::cont_returnBarrier_id;
+    StubCodeMark mark(this, stub_id);
+    address start = __ pc();
+    generate_cont_thaw(Continuation::thaw_return_barrier);
+    return start;
+  }
+
+  address generate_cont_returnBarrier_exception() {
+    if (!Continuations::enabled()) return nullptr;
+    StubGenStubId stub_id = StubGenStubId::cont_returnBarrierExc_id;
+    StubCodeMark mark(this, stub_id);
+    address start = __ pc();
+    generate_cont_thaw(Continuation::thaw_return_barrier_exception);
+    return start;
+  }
+
+  address generate_cont_preempt_stub() {
+    if (!Continuations::enabled()) return nullptr;
+    StubGenStubId stub_id = StubGenStubId::cont_preempt_id;
+    StubCodeMark mark(this, stub_id);
+    address start = __ pc();
+
+    __ reset_last_Java_frame(true);
+
+    // SP = enterSpecial frame; remove all frames copied to heap.
+    __ ld(SP, Address(TREG, JavaThread::cont_entry_offset()));
+
+    Label preemption_cancelled;
+    __ lbu(AT, Address(TREG, JavaThread::preemption_cancelled_offset()));
+    __ bne(AT, R0, preemption_cancelled);
+    __ delayed()->nop();
+
+    // Resume Continuation.run() to unmount the virtual thread.
+    SharedRuntime::continuation_enter_cleanup(_masm);
+    __ leave();
+    __ jr(RA);
+    __ delayed()->nop();
+
+    // Lock was acquired while frozen; thaw to continue.
+    __ bind(preemption_cancelled);
+    __ sb(R0, Address(TREG, JavaThread::preemption_cancelled_offset()));
+    // Restore FP = SP + ContinuationEntry::size() (MIPS enter() sets FP=SP)
+    __ li(AT, checked_cast<int32_t>(ContinuationEntry::size()));
+    __ daddu(FP, SP, AT);
+    __ li(AT, ContinuationEntry::thaw_call_pc_address());
+    __ ld(AT, Address(AT, 0));
+    __ jr(AT);
+    __ delayed()->nop();
+
+    return start;
+  }
+
+  void generate_continuation_stubs() {
+    StubRoutines::_cont_thaw             = generate_cont_thaw();
+    StubRoutines::_cont_returnBarrier    = generate_cont_returnBarrier();
+    StubRoutines::_cont_returnBarrierExc = generate_cont_returnBarrier_exception();
+    StubRoutines::_cont_preempt_stub     = generate_cont_preempt_stub();
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+
+#undef __
+#define __ masm->
+
   void generate_all() {
     // Generates all stubs and initializes the entry points
 
@@ -2693,9 +2898,11 @@ class StubGenerator: public StubCodeGenerator {
     // generate_all: arraycopy stubs + verify_oop (only generated once, in final_id)
     switch(blob_id) {
       case initial_id:
-      case continuation_id:
       case compiler_id:
         generate_initial();
+        break;
+      case continuation_id:
+        generate_continuation_stubs();
         break;
       case final_id:
         generate_all();

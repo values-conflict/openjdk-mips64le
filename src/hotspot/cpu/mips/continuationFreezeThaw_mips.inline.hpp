@@ -140,6 +140,7 @@ inline void FreezeBase::relativize_interpreted_frame_metadata(const frame& f, co
   assert(hf.unextended_sp() == (intptr_t*)hf.at(frame::interpreter_frame_last_sp_offset), "");
   assert(hf.unextended_sp() <= (intptr_t*)hf.at(frame::interpreter_frame_initial_sp_offset), "");
   assert(hf.fp()            >  (intptr_t*)hf.at(frame::interpreter_frame_initial_sp_offset), "");
+
 }
 
 inline void FreezeBase::set_top_frame_metadata_pd(const frame& hf) {
@@ -263,6 +264,20 @@ inline intptr_t* ThawBase::push_cleanup_continuation() {
 inline void ThawBase::derelativize_interpreted_frame_metadata(const frame& hf, const frame& f) {
   assert((intptr_t*)f.at_relative(frame::interpreter_frame_last_sp_offset) == f.unextended_sp(), "");
   assert(f.at_absolute(frame::interpreter_frame_monitor_block_top_offset) <= frame::interpreter_frame_initial_sp_offset, "");
+
+  // After thaw, FP[-9] (initial_sp / monitor_block_top) is the stale value from the
+  // original VT stack.  remove_activation walks from FP[-9] down to frame_sp checking
+  // for locked BasicObjectLocks.  If FP[-9] points outside the new frame (different
+  // carrier or different entry_sp), the scan reads garbage and may find a non-null
+  // obj → IllegalMonitorStateException.  Reset it to f.sp() so the monitor block
+  // appears empty (correct for frames without synchronized blocks).
+  // generate_fixed_frame stores `SP` at FP[-9] (= FP - 9*wordSize = actual frame bottom).
+  // After thaw the frame is at a new address, so this stale value is wrong.
+  // remove_activation reads FP[-9] and scans from there to FP[-9]'s address
+  // looking for locked monitors; if they differ it scans garbage and may throw IMSE.
+  // Restore FP[-9] = (address of FP[-9]) so the monitor block appears empty.
+  intptr_t* initial_sp_addr = f.addr_at(frame::interpreter_frame_initial_sp_offset);
+  *initial_sp_addr = (intptr_t)initial_sp_addr;
 }
 
 #endif // CPU_MIPS_CONTINUATIONFREEZETHAW_MIPS_INLINE_HPP

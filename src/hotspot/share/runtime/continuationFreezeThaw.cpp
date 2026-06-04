@@ -1397,6 +1397,12 @@ NOINLINE void FreezeBase::finish_freeze(const frame& f, const frame& top) {
 
   chunk->set_max_thawing_size(chunk->max_thawing_size() + _total_align_size);
 
+  // freeze_slow always processes interpreted frames; mark the chunk so that
+  // thaw_fast is not taken.  thaw_fast reads a relative FP from
+  // set_top_frame_metadata_pd as if it were absolute, which corrupts the frame.
+  // freeze_fast_copy does the equivalent set in its own path.
+  chunk->set_has_mixed_frames(true);
+
   assert(chunk->sp_address() - chunk->start_address() >= _monitors_in_lockstack, "clash with lockstack");
 
   // At this point the chunk is consistent
@@ -1770,6 +1776,14 @@ static inline freeze_result freeze_internal(JavaThread* current, intptr_t* const
 
   assert(!current->cont_fastpath() || freeze.check_valid_fast_path(), "");
   bool fast = UseContinuationFastPath && current->cont_fastpath();
+#if defined(MIPS64)
+  // MIPS is interpreter-only: freeze_fast_copy raw-copies the stack without
+  // calling set_top_frame_metadata_pd, so chunk_sp[-2] gets a raw saved-FP
+  // (which is absolute) instead of the relative offset that StackChunkFrameStream
+  // needs for ChunkFrames::Mixed.  Always use the slow path which calls
+  // finish_freeze → set_top_frame_metadata_pd and sets has_mixed_frames=true.
+  fast = false;
+#endif
   if (fast && freeze.size_if_fast_freeze_available() > 0) {
     freeze.freeze_fast_existing_chunk();
     CONT_JFR_ONLY(freeze.jfr_info().post_jfr_event(&event, oopCont, current);)
@@ -1824,7 +1838,7 @@ static freeze_result is_pinned0(JavaThread* thread, oop cont_scope, bool safepoi
   if (!safepoint) {
     f = f.sender(&map); // this is the yield frame
   } else { // safepoint yield
-#if (defined(X86) || defined(AARCH64) || defined(RISCV64) || defined(LOONGARCH64)) && !defined(ZERO)
+#if (defined(X86) || defined(AARCH64) || defined(RISCV64) || defined(LOONGARCH64) || defined(MIPS64)) && !defined(ZERO)
     f.set_fp(f.real_fp()); // Instead of this, maybe in ContinuationWrapper::set_last_frame always use the real_fp?
 #else
     Unimplemented();

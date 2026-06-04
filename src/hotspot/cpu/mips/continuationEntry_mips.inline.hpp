@@ -41,11 +41,14 @@ inline frame ContinuationEntry::to_frame() const {
 }
 
 inline intptr_t* ContinuationEntry::entry_fp() const {
-  return (intptr_t*)((address)this + size()) + 2;
+  // In MIPS, enter() sets FP = SP (not SP+16 as in LoongArch), so the saved-register
+  // block is at this + size() with no additional offset.
+  return (intptr_t*)((address)this + size());
 }
 
 inline void ContinuationEntry::update_register_map(RegisterMap* map) const {
-  intptr_t** fp = (intptr_t**)(bottom_sender_sp() - 2);
+  // entry_fp() = this + size() = SP_after_push2; enter() saved FP at SP_after_push2[0].
+  intptr_t** fp = (intptr_t**)entry_fp();
   frame::update_map_with_saved_link(map, fp);
 }
 

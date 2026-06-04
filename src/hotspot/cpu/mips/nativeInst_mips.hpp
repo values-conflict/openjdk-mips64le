@@ -731,14 +731,27 @@ inline NativeCallTrampolineStub* nativeCallTrampolineStub_at(address addr) {
   return (NativeCallTrampolineStub*)addr;
 }
 
-// NativePostCallNop: a 3-instruction sequence (nop + 2 ori) used to encode
-// deoptimization metadata inline in compiled code.  Not yet implemented for
-// MIPS; check() always returns false so callers fall back to the OopMapSet path.
+// NativePostCallNop: nop (0x00000000) + ori $0,$0,lo + ori $0,$0,hi
+// encodes oopmap_slot (8 bits) and cb_offset (24 bits) in a 32-bit payload
+// packed as (oopmap_slot << 24) | cb_offset, split across two ori immediates.
 class NativePostCallNop: public NativeInstruction {
 public:
-  bool check() const { return false; }
-  bool decode(int32_t& oopmap_slot, int32_t& cb_offset) const { return false; }
-  bool patch(int32_t oopmap_slot, int32_t cb_offset) { return false; }
+  // ori $0, $0, imm has opcode 0x34, rs=0, rt=0 → upper 16 bits = 0x3400
+  bool check() const {
+    return uint_at(0) == 0x00000000 &&
+           (uint_at(4) >> 16) == 0x3400 &&
+           (uint_at(8) >> 16) == 0x3400;
+  }
+  bool decode(int32_t& oopmap_slot, int32_t& cb_offset) const {
+    uint32_t lo = uint_at(4) & 0xffff;
+    uint32_t hi = uint_at(8) & 0xffff;
+    uint32_t data = (hi << 16) | lo;
+    if (data == 0) return false;
+    cb_offset   = (int32_t)(data & 0xffffff);
+    oopmap_slot = (int32_t)((data >> 24) & 0xff);
+    return true;
+  }
+  bool patch(int32_t oopmap_slot, int32_t cb_offset);
   void make_deopt() { Unimplemented(); }
 };
 

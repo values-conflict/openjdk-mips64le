@@ -411,8 +411,11 @@ address TemplateInterpreterGenerator::generate_return_entry_for(TosState state, 
 
   address entry = __ pc();
 
-  // Restore stack bottom in case i2c adjusted stack
+  // Restore stack bottom in case i2c adjusted stack.
+  // last_sp is stored as word-offset from FP; decode: SP = FP + n * wordSize.
   __ ld(SP, Address(FP, frame::interpreter_frame_last_sp_offset * wordSize));
+  __ dsll(SP, SP, LogBytesPerWord);
+  __ daddu(SP, FP, SP);
   // and NULL it as marker that sp is now tos until next java call
   __ sd(R0, FP, frame::interpreter_frame_last_sp_offset * wordSize);
 
@@ -544,7 +547,9 @@ address TemplateInterpreterGenerator::generate_safept_entry_for(
         address runtime_entry) {
   address entry = __ pc();
   __ push(state);
+  __ push_cont_fastpath(TREG);
   __ call_VM(noreg, runtime_entry);
+  __ pop_cont_fastpath(TREG);
   __ dispatch_via(vtos, Interpreter::_normal_table.table_for(vtos));
   return entry;
 }
@@ -1218,9 +1223,11 @@ address TemplateInterpreterGenerator::generate_native_entry(bool synchronized) {
   }
   __ sw(t, thread, in_bytes(JavaThread::thread_state_offset()));
 
-  // call native method
+  // call native method (bracket with cont_fastpath so freeze knows oldest interp frame)
+  __ push_cont_fastpath(TREG);
   __ jalr(T9);
   __ delayed()->nop();
+  __ pop_cont_fastpath(TREG);
   // result potentially in V0 or F0
 
 
@@ -1799,7 +1806,10 @@ void TemplateInterpreterGenerator::generate_throw_exception() {
   // fixup routine to move the mutated arguments onto the top of our
   // expression stack if necessary.
   __ move(T8, SP);
+  // last_sp stored as word-offset from FP; decode to absolute address for the call.
   __ ld(A2, FP, frame::interpreter_frame_last_sp_offset * wordSize);
+  __ dsll(A2, A2, LogBytesPerWord);
+  __ daddu(A2, FP, A2);
 #ifndef OPT_THREAD
   __ get_thread(thread);
 #endif
@@ -1807,8 +1817,10 @@ void TemplateInterpreterGenerator::generate_throw_exception() {
   __ set_last_Java_frame(thread, noreg, FP, __ pc());
   __ super_call_VM_leaf(CAST_FROM_FN_PTR(address, InterpreterRuntime::popframe_move_outgoing_args), thread, T8, A2);
   __ reset_last_Java_frame(thread, true);
-  // Restore the last_sp and null it out
+  // Restore the last_sp and null it out; decode word-offset to absolute SP.
   __ ld(SP, FP, frame::interpreter_frame_last_sp_offset * wordSize);
+  __ dsll(SP, SP, LogBytesPerWord);
+  __ daddu(SP, FP, SP);
   __ sd(R0, FP, frame::interpreter_frame_last_sp_offset * wordSize);
 
 
@@ -2055,8 +2067,28 @@ void TemplateInterpreterGenerator::stop_interpreter_at() {
 }
 #endif // !PRODUCT
 
-// Loom: generate_cont_resume_interpreter_adapter
+// Called by the thaw machinery when resuming a virtual thread in an interpreted frame.
+// FP and RA are already set by the thaw stub (via push_return_frame / patch_pc).
+// Restore interpreter registers from the frame and return via RA.
 address TemplateInterpreterGenerator::generate_cont_resume_interpreter_adapter() {
-  // TODO: implement continuation resume adapter for Loom
-  return nullptr;
+  if (!Continuations::enabled()) return nullptr;
+  address start = __ pc();
+
+  __ restore_bcp();
+  __ restore_locals();
+
+  // Restore SP from interpreter_frame_last_sp (stored as word-offset from FP).
+  // Decode: SP = FP + n * wordSize (n is negative for downward-growing stack).
+  __ ld(AT, FP, frame::interpreter_frame_last_sp_offset * wordSize);
+  __ dsll(AT, AT, LogBytesPerWord);   // byte offset = n * 8
+  __ daddu(SP, FP, AT);               // SP = FP + byte_offset = last_sp
+  __ sd(R0, FP, frame::interpreter_frame_last_sp_offset * wordSize);  // null out
+
+  // Restore method.
+  __ ld(Rmethod, Address(FP, frame::interpreter_frame_method_offset * wordSize));
+
+  __ jr(RA);
+  __ delayed()->nop();
+
+  return start;
 }

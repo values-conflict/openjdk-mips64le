@@ -509,6 +509,11 @@ class MacroAssembler: public Assembler {
   static int insts_for_patchable_jump(address target);
   static int insts_for_general_jump(address target);
 
+  // Loom continuation support
+  void push_cont_fastpath(Register java_thread = TREG);
+  void pop_cont_fastpath(Register java_thread = TREG);
+  void post_call_nop();
+
   // Floating
   // Data
 

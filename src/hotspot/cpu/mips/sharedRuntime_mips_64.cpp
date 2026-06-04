@@ -35,6 +35,8 @@
 
 #include "oops/klass.inline.hpp"
 #include "prims/methodHandles.hpp"
+#include "runtime/continuation.hpp"
+#include "runtime/continuationEntry.inline.hpp"
 #include "runtime/jniHandles.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/signature.hpp"
@@ -1280,6 +1282,311 @@ static void double_move(MacroAssembler* masm, VMRegPair src, VMRegPair dst) {
   }
 }
 
+// ─── Loom continuation stubs ─────────────────────────────────────────────────
+//
+// enterSpecial(Continuation c, boolean isContinue, boolean isVirtualThread)
+//   j_rarg0 = T0 -- continuation object
+//   j_rarg1 = A0 -- isContinue
+//   j_rarg2 = A1 -- isVirtualThread
+
+// Java argument registers for enterSpecial (matches methodHandles_mips.cpp convention):
+static const Register j_rarg0 = RT0;  // = T0  continuation object
+static const Register j_rarg1 = RA0;  // = A0  isContinue
+static const Register j_rarg2 = RA1;  // = A1  isVirtualThread
+
+// Allocate ContinuationEntry on the stack below the saved FP/RA pair.
+// On exit SP points to the start of the ContinuationEntry.
+static OopMap* continuation_enter_setup(MacroAssembler* masm, int& stack_slots) {
+  assert(ContinuationEntry::size() % VMRegImpl::stack_slot_size == 0, "");
+  assert(in_bytes(ContinuationEntry::cont_offset())  % VMRegImpl::stack_slot_size == 0, "");
+  assert(in_bytes(ContinuationEntry::chunk_offset()) % VMRegImpl::stack_slot_size == 0, "");
+
+  stack_slots += checked_cast<int>(ContinuationEntry::size()) / wordSize;
+  __ li(AT, checked_cast<int>(ContinuationEntry::size()));
+  __ dsubu(SP, SP, AT);
+
+  // oopmap size = (ContinuationEntry + the 2 words from enter()) in stack slots
+  OopMap* map = new OopMap(((int)ContinuationEntry::size() + wordSize) / VMRegImpl::stack_slot_size, 0);
+
+  __ ld(AT, Address(TREG, JavaThread::cont_entry_offset()));
+  __ sd(AT, Address(SP, ContinuationEntry::parent_offset()));
+  __ sd(SP, Address(TREG, JavaThread::cont_entry_offset()));
+
+  return map;
+}
+
+// Fill the ContinuationEntry fields; called after setup and enter().
+// j_rarg0 = continuation object, j_rarg2 = isVirtualThread flag.
+static void fill_continuation_entry(MacroAssembler* masm) {
+#ifdef ASSERT
+  __ li(AT, ContinuationEntry::cookie_value());
+  __ sw(AT, Address(SP, ContinuationEntry::cookie_offset()));
+#endif
+  __ sd(j_rarg0, Address(SP, ContinuationEntry::cont_offset()));
+  __ sw(j_rarg2, Address(SP, ContinuationEntry::flags_offset()));
+  __ sd(R0, Address(SP, ContinuationEntry::chunk_offset()));
+  __ sw(R0, Address(SP, ContinuationEntry::argsize_offset()));
+  __ sw(R0, Address(SP, ContinuationEntry::pin_count_offset()));
+
+  __ ld(AT, Address(TREG, JavaThread::cont_fastpath_offset()));
+  __ sd(AT, Address(SP, ContinuationEntry::parent_cont_fastpath_offset()));
+  __ ld(AT, Address(TREG, JavaThread::held_monitor_count_offset()));
+  __ sd(AT, Address(SP, ContinuationEntry::parent_held_monitor_count_offset()));
+
+  __ sd(R0, Address(TREG, JavaThread::cont_fastpath_offset()));
+  __ sd(R0, Address(TREG, JavaThread::held_monitor_count_offset()));
+}
+
+// Restore thread fields from ContinuationEntry and update FP so that leave()
+// works correctly.  On entry SP == cont_entry.  On exit FP is restored.
+// MIPS enter() sets FP = SP (at the saved-register block), so:
+//   FP_after_cleanup = SP + ContinuationEntry::size()  (no +2*wordSize like LoongArch)
+static void continuation_enter_cleanup(MacroAssembler* masm) {
+#ifndef PRODUCT
+  {
+    Label OK;
+    __ ld(AT, Address(TREG, JavaThread::cont_entry_offset()));
+    __ beq(SP, AT, OK);
+    __ delayed()->nop();
+    __ stop("incorrect sp for continuation_enter_cleanup");
+    __ bind(OK);
+  }
+#endif
+
+  __ ld(AT, Address(SP, ContinuationEntry::parent_cont_fastpath_offset()));
+  __ sd(AT, Address(TREG, JavaThread::cont_fastpath_offset()));
+
+  if (CheckJNICalls) {
+    Label L_skip;
+    __ lwu(AT, Address(SP, ContinuationEntry::flags_offset()));
+    __ beq(AT, R0, L_skip);
+    __ delayed()->nop();
+    __ ld(AT, Address(TREG, JavaThread::jni_monitor_count_offset()));
+    __ beq(AT, R0, L_skip);
+    __ delayed()->nop();
+    __ move(TSR, A0);
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::log_jni_monitor_still_held));
+    __ move(A0, TSR);
+    __ sd(R0, Address(TREG, JavaThread::jni_monitor_count_offset()));
+    __ bind(L_skip);
+  }
+#ifdef ASSERT
+  else {
+    Label L_skip;
+    __ lwu(AT, Address(SP, ContinuationEntry::flags_offset()));
+    __ beq(AT, R0, L_skip);
+    __ delayed()->nop();
+    __ sd(R0, Address(TREG, JavaThread::jni_monitor_count_offset()));
+    __ bind(L_skip);
+  }
+#endif
+
+  __ ld(AT, Address(SP, ContinuationEntry::parent_held_monitor_count_offset()));
+  __ sd(AT, Address(TREG, JavaThread::held_monitor_count_offset()));
+
+  __ ld(AT, Address(SP, ContinuationEntry::parent_offset()));
+  __ sd(AT, Address(TREG, JavaThread::cont_entry_offset()));
+
+  // FP = SP + ContinuationEntry::size()  (restores to where enter() set FP)
+  __ li(AT, (int)ContinuationEntry::size());
+  __ daddu(FP, SP, AT);
+}
+
+static void gen_continuation_enter(MacroAssembler* masm,
+                                   const methodHandle& method,
+                                   const BasicType* sig_bt,
+                                   const VMRegPair* regs,
+                                   int& exception_offset,
+                                   OopMapSet* oop_maps,
+                                   int& frame_complete,
+                                   int& stack_slots,
+                                   int& interpreted_entry_offset,
+                                   int& compiled_entry_offset) {
+  AddressLiteral resolve(SharedRuntime::get_resolve_static_call_stub(),
+                         relocInfo::static_call_type);
+
+  address start = __ pc();
+  Label call_thaw, exit;
+
+  // ── Interpreted entry (interp_only_mode) ──────────────────────────────────
+  interpreted_entry_offset = __ pc() - start;
+  {
+#ifdef ASSERT
+    Label is_interp_only;
+    __ lw(AT, Address(TREG, JavaThread::interp_only_mode_offset()));
+    __ bne(AT, R0, is_interp_only);
+    __ delayed()->nop();
+    __ stop("enterSpecial interpreter entry called when not in interp_only_mode");
+    __ bind(is_interp_only);
+#endif
+
+    // Load args from interpreter stack: [j_rarg2=top, j_rarg1, j_rarg0=deepest]
+    __ ld(j_rarg0, Address(SP, Interpreter::stackElementSize * 2));
+    __ ld(j_rarg1, Address(SP, Interpreter::stackElementSize * 1));
+    __ ld(j_rarg2, Address(SP, Interpreter::stackElementSize * 0));
+    __ push_cont_fastpath(TREG);
+
+    __ enter();
+    stack_slots = 2;
+    OopMap* map = continuation_enter_setup(masm, stack_slots);
+
+    fill_continuation_entry(masm);
+
+    __ bne(j_rarg1, R0, call_thaw);
+    __ delayed()->nop();
+
+    address mark = __ pc();
+    __ trampoline_call(resolve);
+
+    oop_maps->add_gc_map(__ pc() - start, map);
+    __ post_call_nop();
+
+    __ b(exit);
+    __ delayed()->nop();
+
+    CompiledDirectCall::emit_to_interp_stub(masm, mark);
+  }
+
+  // ── Compiled entry ────────────────────────────────────────────────────────
+  __ align(CodeEntryAlignment);
+  compiled_entry_offset = __ pc() - start;
+
+  __ enter();
+  stack_slots = 2;
+  OopMap* map = continuation_enter_setup(masm, stack_slots);
+  frame_complete = __ pc() - start;
+
+  fill_continuation_entry(masm);
+
+  __ bne(j_rarg1, R0, call_thaw);
+  __ delayed()->nop();
+
+  address mark = __ pc();
+  __ trampoline_call(resolve);
+
+  oop_maps->add_gc_map(__ pc() - start, map);
+  __ post_call_nop();
+
+  __ b(exit);
+  __ delayed()->nop();
+
+  // ── Thaw path ─────────────────────────────────────────────────────────────
+  __ bind(call_thaw);
+
+  ContinuationEntry::_thaw_call_pc_offset = __ pc() - start;
+  __ call(CAST_FROM_FN_PTR(address, StubRoutines::cont_thaw()), relocInfo::runtime_call_type);
+  __ delayed()->nop();
+  oop_maps->add_gc_map(__ pc() - start, map->deep_copy());
+  ContinuationEntry::_return_pc_offset = __ pc() - start;
+  __ post_call_nop();
+
+  __ bind(exit);
+
+  // Restore SP to ContinuationEntry, clean up, and return.
+  __ ld(SP, Address(TREG, JavaThread::cont_entry_offset()));
+  ContinuationEntry::_cleanup_offset = __ pc() - start;
+  continuation_enter_cleanup(masm);
+  __ leave();
+  __ jr(RA);
+  __ delayed()->nop();
+
+  // ── Exception handler ─────────────────────────────────────────────────────
+  exception_offset = __ pc() - start;
+  {
+    __ move(TSR, A0);   // save exception oop in callee-saved TSR
+
+    __ ld(SP, Address(TREG, JavaThread::cont_entry_offset()));
+    continuation_enter_cleanup(masm);
+
+    // Load return PC from frame (FP[return_addr_offset] after cleanup restores FP)
+    __ ld(c_rarg1, Address(FP, frame::return_addr_offset * wordSize));
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::exception_handler_for_return_address),
+                    TREG, c_rarg1);
+
+    // V0 = exception handler address
+    __ move(T8, V0);
+    __ move(A0, TSR);   // restore exception oop
+    __ verify_oop(A0);
+
+    __ leave();
+    __ move(A1, RA);    // A1 = exception pc
+    __ jr(T8);
+    __ delayed()->nop();
+  }
+
+  CompiledDirectCall::emit_to_interp_stub(masm, mark);
+}
+
+static void gen_continuation_yield(MacroAssembler* masm,
+                                   const methodHandle& method,
+                                   const BasicType* sig_bt,
+                                   const VMRegPair* regs,
+                                   int& exception_offset,
+                                   OopMapSet* oop_maps,
+                                   int& frame_complete,
+                                   int& stack_slots,
+                                   int& interpreted_entry_offset,
+                                   int& compiled_entry_offset) {
+  enum layout {
+    fp_off, fp_off2,
+    return_off, return_off2,
+    framesize
+  };
+  stack_slots = framesize / VMRegImpl::slots_per_word;
+  assert(stack_slots == 2, "recheck layout");
+
+  address start = __ pc();
+
+  compiled_entry_offset = __ pc() - start;
+  __ enter();
+
+  __ move(c_rarg1, SP);   // T1 = current SP (continuation frame sp arg)
+
+  frame_complete = __ pc() - start;
+  address the_pc = __ pc();
+
+  __ post_call_nop(); // PC tag for fast CodeBlob lookup; must be immediately after the_pc
+
+  __ move(c_rarg0, TREG); // T0 = thread
+  __ set_last_Java_frame(TREG, SP, FP, the_pc);
+  // Use explicit-arg form so call_VM_leaf translates T0→A0 and T1→A1 per MIPS n64 ABI.
+  __ call_VM_leaf(Continuation::freeze_entry(), c_rarg0, c_rarg1);
+  __ reset_last_Java_frame(true);
+
+  Label pinned;
+  __ bne(V0, R0, pinned);  // non-zero return = pinned, return to caller
+  __ delayed()->nop();
+
+  // Yield succeeded: restore SP to ContinuationEntry and clean up.
+  __ ld(SP, Address(TREG, JavaThread::cont_entry_offset()));
+  continuation_enter_cleanup(masm);
+
+  __ bind(pinned);
+
+  // Handle any pending exception from freeze.
+  __ ld(AT, Address(TREG, in_bytes(Thread::pending_exception_offset())));
+  Label ok;
+  __ beq(AT, R0, ok);
+  __ delayed()->nop();
+  __ leave();
+  __ jmp(StubRoutines::forward_exception_entry(), relocInfo::runtime_call_type);
+  __ delayed()->nop();
+  __ bind(ok);
+
+  __ leave();
+  __ jr(RA);
+  __ delayed()->nop();
+
+  OopMap* yield_map = new OopMap(framesize, 1);
+  oop_maps->add_gc_map(the_pc - start, yield_map);
+}
+
+void SharedRuntime::continuation_enter_cleanup(MacroAssembler* masm) {
+  ::continuation_enter_cleanup(masm);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 static void verify_oop_args(MacroAssembler* masm,
                             methodHandle method,
                             const BasicType* sig_bt,
@@ -1373,6 +1680,60 @@ nmethod *SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
                                                 BasicType* in_sig_bt,
                                                 VMRegPair* in_regs,
                                                 BasicType ret_type) {
+  if (method->is_continuation_native_intrinsic()) {
+    int vep_offset = 0;
+    int exception_offset = 0;
+    int frame_complete = 0;
+    int stack_slots = 0;
+    OopMapSet* oop_maps = new OopMapSet();
+    int interpreted_entry_offset = -1;
+    if (method->is_continuation_enter_intrinsic()) {
+      gen_continuation_enter(masm,
+                             method,
+                             in_sig_bt,
+                             in_regs,
+                             exception_offset,
+                             oop_maps,
+                             frame_complete,
+                             stack_slots,
+                             interpreted_entry_offset,
+                             vep_offset);
+    } else if (method->is_continuation_yield_intrinsic()) {
+      gen_continuation_yield(masm,
+                             method,
+                             in_sig_bt,
+                             in_regs,
+                             exception_offset,
+                             oop_maps,
+                             frame_complete,
+                             stack_slots,
+                             interpreted_entry_offset,
+                             vep_offset);
+    } else {
+      guarantee(false, "Unknown Continuation native intrinsic");
+    }
+    __ flush();
+    nmethod* nm = nmethod::new_native_nmethod(method,
+                                              compile_id,
+                                              masm->code(),
+                                              vep_offset,
+                                              frame_complete,
+                                              stack_slots,
+                                              in_ByteSize(-1),
+                                              in_ByteSize(-1),
+                                              oop_maps,
+                                              exception_offset);
+    if (nm == nullptr) return nm;
+    if (method->is_continuation_enter_intrinsic()) {
+      ContinuationEntry::set_enter_code(nm, interpreted_entry_offset);
+    } else if (method->is_continuation_yield_intrinsic()) {
+      _cont_doYield_stub = nm;
+    } else {
+      guarantee(false, "Unknown Continuation native intrinsic");
+    }
+    return nm;
+  }
+
   if (method->is_method_handle_intrinsic()) {
     vmIntrinsics::ID iid = method->intrinsic_id();
     intptr_t start = (intptr_t)__ pc();

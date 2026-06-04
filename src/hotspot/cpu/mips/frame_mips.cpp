@@ -25,6 +25,7 @@
 
 
 #include "compiler/oopMap.hpp"
+#include "runtime/continuationEntry.hpp"
 #include "interpreter/interpreter.hpp"
 #include "gc/shared/collectedHeap.hpp"
 #include "memory/resourceArea.hpp"
@@ -323,9 +324,10 @@ void frame::interpreter_frame_set_monitor_end(BasicObjectLock* value) {
   *((BasicObjectLock**)addr_at(interpreter_frame_monitor_block_top_offset)) = value;
 }
 
-// Used by template based interpreter deoptimization
+// Used by template based interpreter deoptimization and continuation freeze/thaw.
+// Stored as a signed word-offset from fp() so at_relative() can decode it; 0 means null.
 void frame::interpreter_frame_set_last_sp(intptr_t* sp) {
-  *((intptr_t**)addr_at(interpreter_frame_last_sp_offset)) = sp;
+  ptr_at_put(interpreter_frame_last_sp_offset, sp != nullptr ? (sp - fp()) : 0);
 }
 
 frame frame::sender_for_entry_frame(RegisterMap* map) const {
@@ -367,6 +369,11 @@ frame frame::sender_for_interpreter_frame(RegisterMap* map) const {
     update_map_with_saved_link(map, (intptr_t**) addr_at(link_offset));
   }
 #endif /* COMPILER2 */
+  // When the patched sender_sp (fp[-1]) equals the continuation entry's entry_sp,
+  // we're at the VT continuation boundary.  Substitute ContinuationEntry::return_pc()
+  // so the resulting frame is inside the enterSpecial nmethod; this makes
+  // is_continuation_enterSpecial() recognise it and stops the vframeStream walk
+  // before it tries to read CE struct fields as interpreter frame data.
   return frame(sender_sp, unextended_sp, link(), sender_pc());
 }
 

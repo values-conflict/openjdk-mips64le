@@ -521,6 +521,13 @@ void VM_Version::get_processor_features() {
       FLAG_SET_DEFAULT(UseActiveCoresMP, true);
   }
 
+  // Note: LM_LIGHTWEIGHT is the default. LM_LIGHTWEIGHT triggers try_preempt during
+  // monitorenter which needs call_VM_preemptable / restore_after_resume stubs.
+  // For the target workload (no synchronized blocks in VT code), LM_LIGHTWEIGHT
+  // works without those stubs. LM_LEGACY causes IllegalMonitorStateException for
+  // @JvmtiMountTransition methods (like yield0) after thaw because the monitor
+  // counts are managed differently.  Use the default (LM_LIGHTWEIGHT).
+
   // CriticalJNINatives removed in jdk25u
 }
 

@@ -1844,3 +1844,18 @@ bool NativeInstruction::is_safepoint_poll() {
   // we check the safepoint instruction like the this.
   return is_op(Assembler::lw_op) && is_rt(AT);
 }
+
+bool NativePostCallNop::patch(int32_t oopmap_slot, int32_t cb_offset) {
+  if (((uint32_t)oopmap_slot & ~0xff) != 0 ||
+      ((uint32_t)cb_offset   & ~0xffffff) != 0) {
+    return false; // values too large to encode
+  }
+  uint32_t data = ((uint32_t)oopmap_slot << 24) | ((uint32_t)cb_offset & 0xffffff);
+  uint32_t lo = data & 0xffff;
+  uint32_t hi = (data >> 16) & 0xffff;
+  // ori $0, $0, imm = 0x34000000 | imm
+  *(uint32_t*)addr_at(4) = 0x34000000 | lo;
+  *(uint32_t*)addr_at(8) = 0x34000000 | hi;
+  OrderAccess::fence();
+  return true;
+}

@@ -41,6 +41,8 @@
 #include "oops/klass.inline.hpp"
 #include "prims/methodHandles.hpp"
 
+#include "runtime/continuation.hpp"
+#include "runtime/continuationEntry.inline.hpp"
 #include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/jniHandles.hpp"
 #include "runtime/objectMonitor.hpp"
@@ -3464,4 +3466,46 @@ void MacroAssembler::cmp_cmov(Register      op1,
     default:
       Unimplemented();
   }
+}
+
+// Update _cont_fastpath to SP if SP > current fastpath (track oldest interpreted frame).
+// Uses only AT -- safe to call even when T9 holds a native function pointer.
+void MacroAssembler::push_cont_fastpath(Register java_thread) {
+  if (!Continuations::enabled()) return;
+  Label done;
+  ld(AT, Address(java_thread, JavaThread::cont_fastpath_offset()));
+  // AT = cont_fastpath.  Set cont_fastpath = SP when SP > cont_fastpath (marking
+  // that an interpreter/slow frame is present below the current SP).
+  sltu(AT, AT, SP);    // AT = (old_AT < SP) ? 1 : 0
+  beq(AT, R0, done);   // skip if old_AT >= SP (already marked at or below this level)
+  delayed()->nop();
+  sd(SP, Address(java_thread, JavaThread::cont_fastpath_offset()));
+  bind(done);
+}
+
+// Update _cont_fastpath to SP when SP < cont_fastpath (SP is a newer/lower frame).
+// Keeps cont_fastpath non-null (slow-path flag stays set) while tracking the
+// most-recent SP.  Uses only AT -- safe to call even when T9 holds a function pointer.
+void MacroAssembler::pop_cont_fastpath(Register java_thread) {
+  if (!Continuations::enabled()) return;
+  Label done;
+  ld(AT, Address(java_thread, JavaThread::cont_fastpath_offset()));
+  // AT = cont_fastpath.  Update to SP only if SP < cont_fastpath (SP is lower/newer).
+  sltu(AT, SP, AT);    // AT = (SP < old_AT) ? 1 : 0
+  beq(AT, R0, done);   // skip if SP >= cont_fastpath (no update needed)
+  delayed()->nop();
+  sd(SP, Address(java_thread, JavaThread::cont_fastpath_offset()));
+  bind(done);
+}
+
+// Emit a 3-instruction sequence (nop + 2x ori $0,$0,0) tagged with
+// post_call_nop relocation so nmethod::finalize_relocations() can encode
+// oopmap_slot/cb_offset inline for fast CodeBlob lookup during stack walks.
+void MacroAssembler::post_call_nop() {
+  if (!Continuations::enabled()) return;
+  InstructionMark im(this);
+  relocate(post_call_nop_Relocation::spec());
+  nop();
+  ori(R0, R0, 0);
+  ori(R0, R0, 0);
 }
