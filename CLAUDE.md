@@ -147,6 +147,38 @@ file for any LLM doing hands-on work. Covers:
 - Bash recipes for finding Loongson commits, diffing file pairs, and verifying open questions
 - background: tag mystery, author notes, jdk11u vs jdk17u differences
 
+### `tests/`
+
+Minimal Java programs validating each porting phase on QEMU and real hardware.
+Organized into per-phase subdirectories -- each file tests one concept and runs
+with `java FileName.java`.
+
+- `tests/phase-1/` -- basic JVM: `H2.java` (bare print), `H.java` (hello with args),
+  `T.java` (string concat / `invokedynamic`), `M.java` (HashMap), `S.java`
+  (synchronized threads)
+- `tests/phase-2/` -- virtual threads: `MinYield.java` (minimal single-VT yield),
+  `Phase2Test.java` (5-case freeze/thaw suite)
+
+Run against the built jdk25u:
+
+```bash
+QEMU_CPU=Loongson-3A1000 \
+  QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  tianon-jdk25u-mips64/build/linux-mips64el-server-release/images/jdk/bin/java \
+  tests/phase-1/T.java
+```
+
+**Notes for LLMs doing porting or debugging work:**
+
+- when fixing a new class of bugs, check whether a test exists in `tests/` -- if not,
+  add the smallest possible `.java` that exercises exactly that bug class to the
+  current phase's subdirectory
+- one concept per file; every file must run with `java FileName.java` (single-source
+  launch, no separate compile step needed)
+- when a new phase begins, create `tests/phase-N/`
+- after tests pass on hardware, list the test files in the phase completion note in
+  *Suggested Next Steps* and update the entries here
+
 ## Suggested Next Steps
 
 **Phase 0 is complete (2026-05-30).**  jdk17u mips64el builds successfully with GCC 12 on
