@@ -404,8 +404,8 @@ user-mode (see `qemu-mips64el --help`).  They work whether `qemu-mips64el` is in
 directly or whether a binfmt_misc handler on the host runs it transparently:
 
 ```bash
-QEMU_CPU=Loongson-3A1000 \
-  QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  timeout --kill-after=5s 60 \
   build/linux-mips64el-server-release/images/jdk/bin/java -version
 ```
 
@@ -675,12 +675,13 @@ Tests are always invoked the same way on both platforms -- single-source launch,
 no pre-compilation step, no extra JVM flags:
 
 ```bash
-# QEMU (from the workspace root):
+# QEMU (timeout wrapper required — hung JVMs ignore SIGTERM; only SIGKILL is guaranteed):
 QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  timeout --kill-after=5s 60 \
   tianon-jdk25u-mips64/build/linux-mips64el-server-release/images/jdk/bin/java \
   tests/phase-N/FooBar.java
 
-# Hardware (same single-source invocation, no env vars needed):
+# Hardware (same single-source invocation, no env vars or wrapper needed):
 ./test-jdk25/bin/java tests/phase-N/FooBar.java
 ```
 
@@ -1032,8 +1033,10 @@ All Phase 1 target tests pass locally under QEMU and on real Loongson-3 hardware
 
 ```bash
 QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  timeout --kill-after=5s 60 \
   build/linux-mips64el-server-release/images/jdk/bin/java --version
 QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  timeout --kill-after=5s 60 \
   build/linux-mips64el-server-release/images/jdk/bin/java /tmp/T.java
 ```
 
@@ -1459,16 +1462,19 @@ Loongson-3 hardware (confirmed 2026-06-08).
 **Workaround for QEMU mixed-mode:**
 ```bash
 QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  timeout --kill-after=5s 60 \
   java -Xint [-XX:-UseCompiler] <program>
 ```
 
-**Running mixed-mode tests under QEMU (C2 enabled) — critical timeout pattern:**
+**Running any `java` under QEMU — mandatory timeout pattern:**
 
-Mixed-mode tests MUST use `timeout --kill-after` to prevent hung processes.
-QEMU-emulated JVMs that hit G1 GC races, infinite recursion, or hard faults can
-hang indefinitely consuming 100% CPU.  SIGTERM alone is not enough; SIGKILL is
-required via `--kill-after`.  Also kill any orphaned QEMU processes after each test.
-The binfmt-transparent invocation makes child-process cleanup non-obvious.
+Every QEMU `java` invocation MUST use `timeout --kill-after` to prevent hung processes.
+QEMU-emulated JVMs that hit G1 GC races, infinite recursion, or hard faults can hang
+indefinitely consuming 100% CPU.  A hung JVM installs its own signal handlers and may
+not respond to SIGTERM; SIGKILL (sent by `--kill-after` after the grace period) cannot
+be caught or ignored and is the only guaranteed kill.  Also kill any orphaned QEMU
+processes after each test; the binfmt-transparent invocation makes child-process cleanup
+non-obvious.
 
 ```bash
 export QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64

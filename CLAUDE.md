@@ -180,8 +180,8 @@ with `java FileName.java`.
 Run against the built jdk25u:
 
 ```bash
-QEMU_CPU=Loongson-3A1000 \
-  QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  timeout --kill-after=5s 60 \
   tianon-jdk25u-mips64/build/linux-mips64el-server-release/images/jdk/bin/java \
   tests/phase-1/T.java
 ```
@@ -193,15 +193,24 @@ must pass on QEMU before hardware testing begins — if it does not work in QEMU
 does not work, full stop.  Do not treat QEMU failures as acceptable limitations or
 move to hardware to paper over them.
 
+**Every `java` invocation under QEMU must be wrapped in `timeout --kill-after=5s 60`.**
+A QEMU-emulated JVM that hits a hard fault, G1 GC race, or infinite recursion can hang
+indefinitely consuming 100% CPU.  A hung JVM installs its own signal handlers and may
+not respond to `SIGTERM`; `--kill-after` sends `SIGKILL` after the grace period, which
+cannot be caught or ignored and is the only guaranteed kill.  Never run a bare `java`
+command under QEMU without this wrapper.  Use `./run-tests-qemu.sh` for all phase test
+runs — it handles timeouts and orphan cleanup correctly.
+
 Tests are always invoked the same way on both QEMU and hardware:
 
 ```bash
-# QEMU:
+# QEMU (timeout wrapper required):
 QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  timeout --kill-after=5s 60 \
   tianon-jdk25u-mips64/build/linux-mips64el-server-release/images/jdk/bin/java \
   tests/phase-N/FooBar.java
 
-# Hardware (same invocation, no env vars needed):
+# Hardware (same invocation, no env vars or wrapper needed):
 ./test-jdk25/bin/java tests/phase-N/FooBar.java
 ```
 
@@ -446,6 +455,7 @@ All 9 QEMU tests pass and jenkins-agent connects stably (confirmed 2026-06-09).
 **Running tests (QEMU):**
 ```bash
 QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+  timeout --kill-after=5s 60 \
   tianon-jdk25u-mips64/build/linux-mips64el-server-release/images/jdk/bin/java \
   tests/phase-N/FooBar.java
 ```

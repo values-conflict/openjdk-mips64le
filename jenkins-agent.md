@@ -84,6 +84,7 @@ Ctrl-C; clean exit is good.
 
 ```console
 $ QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
+	timeout --kill-after=5s 60 \
 	tianon-jdk25u-mips64/build/linux-mips64el-server-release/images/jdk/bin/java \
 	-jar jenkins-agent.jar \
 	-url http://<jenkins-ip>:8080/ \
