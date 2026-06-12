@@ -1,0 +1,154 @@
+
+
+
+$ time java --version
+openjdk 25.0.3-internal 2026-04-21
+OpenJDK Runtime Environment Tianon (build 25.0.3-internal-adhoc.tianon.tianon-jdk25u-mips64)
+OpenJDK 64-Bit  VM Tianon (build 25.0.3-internal-adhoc.tianon.tianon-jdk25u-mips64, interpreted mode)
+
+real	0m0.328s
+user	0m0.223s
+sys	0m0.027s
+$ echo $?
+0
+
+
+$ time java -jar jenkins-agent.jar -help 2>&1 | head -5
+ -agentLog FILE                         : Local agent error log destination
+                                          (overrides workDir)
+ -auth user:pass                        : (deprecated) unused; use -credentials
+                                          or -proxyCredentials
+ -cert VAL                              : Specify additional X.509 encoded PEM
+
+real	0m1.256s
+user	0m1.152s
+sys	0m0.059s
+$ echo $?
+0
+
+
+$ time java tests/phase-1/H2.java
+42
+
+real	0m5.966s
+user	0m5.770s
+sys	0m0.063s
+$ echo $?
+0
+
+
+$ time java tests/phase-1/H.java foo bar
+hello 2
+
+real	0m6.407s
+user	0m6.309s
+sys	0m0.066s
+$ echo $?
+0
+
+
+$ time java tests/phase-1/M.java
+3
+
+real	0m8.581s
+user	0m8.512s
+sys	0m0.039s
+$ echo $?
+0
+
+
+$ time java tests/phase-1/S.java
+1
+
+real	0m6.542s
+user	0m6.477s
+sys	0m0.063s
+$ echo $?
+0
+
+
+$ time java tests/phase-1/T.java
+hello 42 world: mips64el
+
+real	0m6.371s
+user	0m6.289s
+sys	0m0.051s
+$ echo $?
+0
+
+
+$ time java tests/phase-2/MinYield.java
+ok
+
+real	0m6.395s
+user	0m6.289s
+sys	0m0.047s
+$ echo $?
+0
+
+
+$ time java tests/phase-2/Phase2Test.java
+Phase 2 freeze/thaw validation
+pass 1: single VT yield
+pass 2: yield resumes correctly, result=2
+pass 3: multiple yields, counter=3
+pass 4: parkNanos completed, elapsed=5579556ns
+pass 5: 5 concurrent yielding VTs, sum=15
+all 5 tests passed
+
+real	0m9.921s
+user	0m9.820s
+sys	0m0.059s
+$ echo $?
+0
+
+
+$ time javac --enable-preview --source 25 -d /tmp/tmp.oZc9Og1tWE tests/phase-3/Bench.java
+
+real	0m13.151s
+user	0m12.977s
+sys	0m0.082s
+$ echo $?
+0
+
+
+$ time java --enable-preview -cp /tmp/tmp.oZc9Og1tWE Bench
+JIT throughput benchmark (time-bounded warmup)
+warmup: 108 M iters in 30000 ms
+timed:  7 M iters in 2000 ms = 3 M/s
+  (JIT: ~500 M/s QEMU / ~100-200 M/s hw;  -Xint: ~3-5 M/s)
+NOTE: 3 M/s < 30 M/s — JIT not compiling user code
+PASS
+
+real	0m32.535s
+user	0m32.410s
+sys	0m0.043s
+$ echo $?
+0
+
+
+$ time java tests/phase-3/CurrentThread.java
+ok: currentThread name=main
+
+real	0m13.056s
+user	0m12.996s
+sys	0m0.039s
+$ echo $?
+0
+
+
+$ time java tests/phase-3/Phase3Test.java
+Phase 3 C2 JIT validation
+pass 1: integer loop sum=704982704
+pass 2: long 20! = 2432902008176640000
+pass 3: array checksum=199768
+pass 4: virtual dispatch total=4999950000
+pass 5: Thread.currentThread() name=main
+all 5 tests passed
+
+real	0m13.514s
+user	0m13.438s
+sys	0m0.039s
+$ echo $?
+0
+

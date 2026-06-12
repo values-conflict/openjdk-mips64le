@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail -x
 
-src="${1:?usage: $0 <jdk-source-dir>}"
+debugLevel='release'
+if [ "${1:-}" = '--debug' ]; then
+	debugLevel='fastdebug'
+	shift
+fi
+
+src="${1:?usage: $0 [--debug] <jdk-source-dir>}"
 
 versionConf="$src/make/conf/version-numbers.conf"
 if [ ! -f "$versionConf" ]; then
@@ -45,7 +51,7 @@ args=(
 	--with-vendor-bug-url='https://github.com/values-conflict/openjdk-mips64le'
 
 	# build type
-	--with-debug-level=release
+	--with-debug-level="$debugLevel"
 	--enable-headless-only
 
 	# bundled libraries (avoid host-library version skew)
@@ -70,12 +76,7 @@ args=(
 
 )
 
-# Remove when Phase 3 (C2 JIT) is complete.
-if grep -q 'mips64el' make/autoconf/jvm-features.m4 2>/dev/null; then
-	args+=( --with-jvm-features=-compiler2 )
-fi
-
 bash ./configure "${args[@]}"
 
-{ time gmake CONF=release images; } \
-	2>&1 | tee build/linux-mips64el-server-release/build.log
+{ time gmake CONF="$debugLevel" images; } 2>&1 \
+	| tee "build/linux-mips64el-server-$debugLevel/build.log"
