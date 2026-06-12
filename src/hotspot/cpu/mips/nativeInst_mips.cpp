@@ -480,7 +480,7 @@ address NativeCall::destination() const {
 // during code generation, where no patching lock is needed.
 void NativeCall::set_destination_mt_safe(address dest, bool assert_lock) {
   assert(!assert_lock ||
-         (Patching_lock->is_locked() || SafepointSynchronize::is_at_safepoint()) ||
+         (CodeCache_lock->is_locked() || SafepointSynchronize::is_at_safepoint()) ||
          CompiledICLocker::is_safe(addr_at(0)),
          "concurrent code patching");
 
@@ -791,7 +791,9 @@ void  NativeCall::set_destination(address dest) {
     set_int_at(0, (first_word & 0xffff0000) | (Assembler::split_low((intptr_t)dest >> 48) & 0xffff));
     ICache::invalidate_range(addr_at(0), 24);
   } else if (is_op(int_at(16), Assembler::jal_op)) {
-    if (UseLEXT1) {
+    // Use _gs (atomic 128-bit store) only when 16-byte aligned; fall back otherwise.
+    // Non-C2 call sites (blobs) may not be aligned but are patched single-threaded.
+    if (UseLEXT1 && ((long)addr_at(0) % (BytesPerWord * 2) == 0)) {
       patch_on_jal_gs(dest);
     } else {
       patch_on_jal(dest);
@@ -799,7 +801,8 @@ void  NativeCall::set_destination(address dest) {
   } else if (is_op(int_at(0), Assembler::jal_op)) {
     patch_on_jal_only(dest);
   } else if (is_special_op(int_at(16), Assembler::jalr_op)) {
-    if (UseLEXT1) {
+    // Use _gs (atomic 128-bit store) only when 16-byte aligned; fall back otherwise.
+    if (UseLEXT1 && ((long)addr_at(0) % (BytesPerWord * 2) == 0)) {
       patch_on_jalr_gs(dest);
     } else {
       patch_on_jalr(dest);

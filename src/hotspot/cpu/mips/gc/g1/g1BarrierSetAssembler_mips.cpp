@@ -307,6 +307,8 @@ void G1BarrierSetAssembler::g1_write_barrier_post(MacroAssembler* masm,
   // dirty card and log.
   __ move(AT, (int)G1CardTable::dirty_card_val());
   __ sb(AT, card_addr, 0);
+  // MIPS store ordering: card-dirty must be visible before queue log.
+  __ sync();
 
   __ lw(AT, queue_index);
   __ beq(AT, R0, runtime);
@@ -387,34 +389,224 @@ void G1BarrierSetAssembler::oop_store_at(MacroAssembler* masm, DecoratorSet deco
 
 #ifdef COMPILER2
 
+// --- C2 G1 barrier helper statics ---
+
+static void generate_queue_test_and_insertion(MacroAssembler* masm,
+                                              ByteSize index_offset,
+                                              ByteSize buffer_offset,
+                                              Label& runtime,
+                                              const Register thread,
+                                              const Register value,
+                                              const Register tmp1,
+                                              const Register tmp2) {
+  __ ld(tmp1, Address(thread, in_bytes(index_offset)));    // tmp1 = index
+  __ beq(tmp1, R0, runtime); __ delayed()->nop();          // index == 0 → full, use runtime
+  __ daddiu(tmp1, tmp1, -wordSize);                        // tmp1 = next index
+  __ sd(tmp1, Address(thread, in_bytes(index_offset)));    // store next index
+  __ ld(tmp2, Address(thread, in_bytes(buffer_offset)));   // tmp2 = buffer base
+  __ daddu(tmp1, tmp2, tmp1);                              // tmp1 = buffer + next index
+  __ sd(value, Address(tmp1));                             // *(buffer + next index) = value
+}
+
+static void generate_pre_barrier_fast_path(MacroAssembler* masm,
+                                           const Register thread) {
+  // Read the SATB-active flag into AT (the MIPS assembler temporary, r1).
+  // AT is NOT in C2's allocatable register set, so writing 0 or 1 here cannot
+  // corrupt any C2-managed variable.  The caller branches on AT via bne_far;
+  // bne_far's internal b_far expansion also uses AT but only AFTER the
+  // comparison value has already been consumed by the preceding beq instruction.
+  Address in_progress(thread, in_bytes(G1ThreadLocalData::satb_mark_queue_active_offset()));
+  if (in_bytes(SATBMarkQueue::byte_width_of_active()) == 4) {
+    __ lwu(AT, in_progress);
+  } else {
+    assert(in_bytes(SATBMarkQueue::byte_width_of_active()) == 1, "Assumption");
+    __ lbu(AT, in_progress);
+  }
+}
+
+static void generate_pre_barrier_slow_path(MacroAssembler* masm,
+                                           const Register obj,
+                                           const Register pre_val,
+                                           const Register thread,
+                                           const Register tmp1,
+                                           const Register tmp2,
+                                           Label& done,
+                                           Label& runtime) {
+  if (obj != noreg) {
+    __ load_heap_oop(pre_val, Address(obj, 0), noreg, noreg, AS_RAW);
+  }
+  __ beq(pre_val, R0, done); __ delayed()->nop();   // pre_val == null? done
+  generate_queue_test_and_insertion(masm,
+                                    G1ThreadLocalData::satb_mark_queue_index_offset(),
+                                    G1ThreadLocalData::satb_mark_queue_buffer_offset(),
+                                    runtime,
+                                    thread, pre_val, tmp1, tmp2);
+  __ beq(R0, R0, done); __ delayed()->nop();
+}
+
+static void generate_post_barrier_fast_path(MacroAssembler* masm,
+                                            const Register store_addr,
+                                            const Register new_val,
+                                            Label& done,
+                                            bool new_val_may_be_null) {
+  // K0, K1, and AT are the C2-invisible MIPS barrier scratch registers.
+  // store_addr may be AT (IndOffset8/BasePosIndex effective addresses).
+  // new_val may be K0 (decoded OOP placed there by IndOffset8 caller).
+  // In both cases the register usage below is safe:
+  //   dsrl(K1, store_addr, ...) reads store_addr first, writes K1 — no clobber.
+  //   xorr(K0, store_addr, new_val) reads both, writes K0 — safe even if K0==new_val.
+  if (new_val_may_be_null) {
+    __ beq(new_val, R0, done); __ delayed()->nop();
+  }
+  __ dsrl(K1, store_addr, CardTable::card_shift());    // K1 = card page
+  __ xorr(K0, store_addr, new_val);                   // K0 = addr ^ val
+  __ li64(AT, (jlong)(address)&G1HeapRegion::LogOfHRGrainBytes);
+  __ lw(AT, AT, 0);                                   // AT = LogOfHRGrainBytes
+  __ dsrlv(K0, K0, AT);                               // K0 = region_diff
+  __ beq(K0, R0, done); __ delayed()->nop();          // same region? done
+  // Different region: compute card address into K1.
+  CardTableBarrierSet* ctbs = barrier_set_cast<CardTableBarrierSet>(BarrierSet::barrier_set());
+  __ li64(AT, (intptr_t)ctbs->card_table()->byte_map_base());
+  __ daddu(K1, K1, AT);                               // K1 = card address
+  __ lbu(AT, Address(K1));                            // AT = card value
+  // Outputs: K1 = card address (stub->tmp1()), AT = card value.
+}
+
+static void generate_post_barrier_slow_path(MacroAssembler* masm,
+                                            const Register thread,
+                                            const Register card_addr,   // K1
+                                            const Register scratch,     // K0
+                                            Label& done,
+                                            Label& runtime) {
+  __ sync();                                         // StoreLoad barrier
+  __ lbu(scratch, Address(card_addr));               // scratch = card value
+  __ beq(scratch, R0, done); __ delayed()->nop();   // already dirty? done
+  STATIC_ASSERT(CardTable::dirty_card_val() == 0);
+  __ sb(R0, Address(card_addr));                    // dirty the card
+  // MIPS store ordering: ensure card-dirty store is visible to G1
+  // refinement threads before logging the card address in the queue.
+  __ sync();
+  generate_queue_test_and_insertion(masm,
+                                    G1ThreadLocalData::dirty_card_queue_index_offset(),
+                                    G1ThreadLocalData::dirty_card_queue_buffer_offset(),
+                                    runtime,
+                                    thread, card_addr, scratch, AT);
+  __ beq(R0, R0, done); __ delayed()->nop();
+}
+
+static void generate_c2_barrier_runtime_call(MacroAssembler* masm,
+                                             G1BarrierStubC2* stub,
+                                             const Register arg,
+                                             const address runtime_path) {
+  SaveLiveRegisters save_registers(masm, stub);
+  if (A0 != arg) {
+    __ move(A0, arg);
+  }
+  __ move(A1, TREG);
+  // Use T9 so the callee's daddu $gp,$gp,$t9 prologue sets up GP correctly.
+  __ set64(T9, (intptr_t)runtime_path);
+  __ jalr(T9); __ delayed()->nop();
+}
+
+// --- C2 G1 barrier implementations ---
+
 void G1BarrierSetAssembler::g1_write_barrier_pre_c2(MacroAssembler* masm,
                                                     Register obj,
                                                     Register pre_val,
                                                     Register thread,
-                                                    Register tmp1,
-                                                    Register tmp2,
-                                                    G1PreBarrierStubC2* c2_stub) {
-  Unimplemented();
+                                                    Register /* tmp1 */,  // ignored; AT used
+                                                    Register /* tmp2 */,  // ignored; K1 used
+                                                    G1PreBarrierStubC2* stub) {
+  assert(thread == TREG, "must be");
+  assert(pre_val != noreg, "expecting a register");
+  // K0 (pre_val) holds the old OOP; AT is the satb-active flag and queue-index
+  // scratch; K1 is the queue-buffer scratch.  All three are C2-invisible.
+  stub->initialize_registers(obj, pre_val, thread, AT /* queue index */, K1 /* queue buffer */);
+
+  // compute_liveness_at_stubs records LIVEOUT of the barrier node.  Any
+  // caller-save register that is live across the barrier only via a
+  // post-insert_copies() SpillCopy has its live range extended past the barrier
+  // after liveness is computed; the LIVEOUT-based preserve_set misses it.  The
+  // C runtime call in the queue-full slow path then corrupts those registers.
+  // Force-preserve all caller-save registers (callee-save registers are
+  // protected by the C ABI automatically).
+  stub->preserve(T0); stub->preserve(T1); stub->preserve(T2); stub->preserve(T3);
+  stub->preserve(T8); stub->preserve(T9); stub->preserve(V0); stub->preserve(V1);
+  stub->preserve(A0); stub->preserve(A1); stub->preserve(A2); stub->preserve(A3);
+  stub->preserve(A4); stub->preserve(A5); stub->preserve(A6); stub->preserve(A7);
+
+  generate_pre_barrier_fast_path(masm, thread);
+  // If marking is active (AT != 0), jump to stub slow path
+  __ bne_far(AT, R0, *stub->entry());
+
+  __ bind(*stub->continuation());
 }
 
 void G1BarrierSetAssembler::generate_c2_pre_barrier_stub(MacroAssembler* masm,
                                                          G1PreBarrierStubC2* stub) const {
-  Unimplemented();
+  Assembler::InlineSkippedInstructionsCounter skip_counter(masm);
+  Label runtime;
+  Register obj    = stub->obj();
+  Register pre_val = stub->pre_val();
+  Register thread = stub->thread();
+  Register tmp1   = stub->tmp1();
+  Register tmp2   = stub->tmp2();
+
+  __ bind(*stub->entry());
+  generate_pre_barrier_slow_path(masm, obj, pre_val, thread, tmp1, tmp2,
+                                 *stub->continuation(), runtime);
+
+  __ bind(runtime);
+  generate_c2_barrier_runtime_call(masm, stub, pre_val,
+      CAST_FROM_FN_PTR(address, G1BarrierSetRuntime::write_ref_field_pre_entry));
+  __ b_far(*stub->continuation()); __ delayed()->nop();
 }
 
 void G1BarrierSetAssembler::g1_write_barrier_post_c2(MacroAssembler* masm,
                                                      Register store_addr,
                                                      Register new_val,
                                                      Register thread,
-                                                     Register tmp1,
-                                                     Register tmp2,
-                                                     G1PostBarrierStubC2* c2_stub) {
-  Unimplemented();
+                                                     Register /* tmp1 */,  // ignored; K0 used
+                                                     Register /* tmp2 */,  // ignored; K1 used
+                                                     G1PostBarrierStubC2* stub) {
+  assert(thread == TREG, "must be");
+  assert(store_addr != noreg && new_val != noreg, "expecting a register");
+  // K1 receives the card address and K0 is the freed scratch; both C2-invisible.
+  stub->initialize_registers(thread, K1 /* card_addr */, K0 /* freed */);
+  // Same preserve rationale as g1_write_barrier_pre_c2: force-preserve all
+  // caller-save registers against C runtime corruption in the queue-full path.
+  stub->preserve(T0); stub->preserve(T1); stub->preserve(T2); stub->preserve(T3);
+  stub->preserve(T8); stub->preserve(T9); stub->preserve(V0); stub->preserve(V1);
+  stub->preserve(A0); stub->preserve(A1); stub->preserve(A2); stub->preserve(A3);
+  stub->preserve(A4); stub->preserve(A5); stub->preserve(A6); stub->preserve(A7);
+
+  bool new_val_may_be_null = (stub->barrier_data() & G1C2BarrierPostNotNull) == 0;
+  generate_post_barrier_fast_path(masm, store_addr, new_val,
+                                  *stub->continuation(), new_val_may_be_null);
+  // AT holds the card value.  Compare with g1_young_card_val using daddiu (fits simm16,
+  // no extra register needed) to avoid overwriting K1 (which holds card_addr).
+  __ daddiu(AT, AT, -(int)G1CardTable::g1_young_card_val());
+  __ bne_far(AT, R0, *stub->entry());
+
+  __ bind(*stub->continuation());
 }
 
 void G1BarrierSetAssembler::generate_c2_post_barrier_stub(MacroAssembler* masm,
                                                           G1PostBarrierStubC2* stub) const {
-  Unimplemented();
+  Assembler::InlineSkippedInstructionsCounter skip_counter(masm);
+  Label runtime;
+  Register thread    = stub->thread();
+  Register card_addr = stub->tmp1();   // K1: card address set by fast path
+  Register scratch   = stub->tmp2();   // K0: freed scratch
+
+  __ bind(*stub->entry());
+  generate_post_barrier_slow_path(masm, thread, card_addr, scratch,
+                                  *stub->continuation(), runtime);
+
+  __ bind(runtime);
+  generate_c2_barrier_runtime_call(masm, stub, card_addr,
+      CAST_FROM_FN_PTR(address, G1BarrierSetRuntime::write_ref_field_post_entry));
+  __ b_far(*stub->continuation()); __ delayed()->nop();
 }
 
 #endif // COMPILER2

@@ -500,7 +500,7 @@ void trace_method_handle_stub(const char* adaptername,
 
   if (Verbose) {
     tty->print_cr("Registers:");
-    const int saved_regs_count = RegisterImpl::number_of_registers;
+    const int saved_regs_count = Register::number_of_registers;
     for (int i = 0; i < saved_regs_count; i++) {
       Register r = as_Register(i);
       // The registers are stored in reverse order on the stack (by pusha).

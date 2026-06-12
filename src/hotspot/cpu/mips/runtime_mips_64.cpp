@@ -87,7 +87,7 @@
 //                 `- jr OptoRuntime::exception_blob
 //                        `- here
 //
-void OptoRuntime::generate_exception_blob() {
+ExceptionBlob* OptoRuntime::generate_exception_blob() {
   // Capture info about frame layout
   enum layout {
     fp_off,
@@ -139,7 +139,7 @@ void OptoRuntime::generate_exception_blob() {
   assert(StackAlignmentInBytes == 16, "must be");
   __ dins(SP, R0, 0, 4);   // Fix stack alignment as required by ABI
 
-  __ relocate(relocInfo::internal_pc_type);
+  __ relocate(relocInfo::internal_word_type);
 
   {
     long save_pc = (long)__ pc() + 48;
@@ -201,5 +201,5 @@ void OptoRuntime::generate_exception_blob() {
   // make sure all code is generated
   masm->flush();
 
-  _exception_blob = ExceptionBlob::create(&buffer, oop_maps, framesize);
+  return ExceptionBlob::create(&buffer, oop_maps, framesize);
 }

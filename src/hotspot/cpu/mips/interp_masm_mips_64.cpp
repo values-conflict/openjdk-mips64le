@@ -415,6 +415,22 @@ void InterpreterMacroAssembler::gen_subtype_check( Register Rsup_klass, Register
 void InterpreterMacroAssembler::pop_ptr(Register r) {
   ld(r, SP, 0);
   daddiu(SP, SP, Interpreter::stackElementSize);
+  // On QEMU (shift=3) every legitimate full OOP has non-zero upper 32 bits.
+  // A non-null value with zero upper bits is an undecoded NarrowOop left by the
+  // deoptimizer in an oop-typed location.  Decode it so callers receive a valid OOP.
+  if (UseCompressedOops && CompressedOops::shift() != 0) {
+    Label L_ok;
+    dsrl32(AT, r, 0);
+    bne(AT, R0, L_ok);      // upper bits non-zero → already full OOP
+    delayed()->nop();
+    beq(r, R0, L_ok);       // null → ok
+    delayed()->nop();
+    dsll(r, r, CompressedOops::shift());
+    if (CompressedOops::base() != NULL) {
+      daddu(r, r, S5_heapbase);
+    }
+    bind(L_ok);
+  }
 }
 
 void InterpreterMacroAssembler::pop_i(Register r) {
@@ -1888,6 +1904,21 @@ void InterpreterMacroAssembler::profile_parameters_type(Register mdp, Register t
     dsll(AT, tmp2, Interpreter::logStackElementSize);
     daddu(AT, AT, _locals_register);
     ld(tmp2, AT, 0);
+
+    // Decode NarrowOop in the parameter slot (QEMU shift=3: zero upper 32 bits = NarrowOop).
+    if (UseCompressedOops && CompressedOops::shift() != 0) {
+      Label L_param_ok;
+      dsrl32(AT, tmp2, 0);
+      bne(AT, R0, L_param_ok);
+      delayed()->nop();
+      beq(tmp2, R0, L_param_ok);
+      delayed()->nop();
+      dsll(tmp2, tmp2, CompressedOops::shift());
+      if (CompressedOops::base() != NULL) {
+        daddu(tmp2, tmp2, S5_heapbase);
+      }
+      bind(L_param_ok);
+    }
 
     // profile the parameter
     profile_obj_type(tmp2, arg_type);

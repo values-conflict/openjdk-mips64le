@@ -728,6 +728,15 @@ void TemplateTable::aload() {
   transition(vtos, atos);
   locals_index(T2);
   __ ld(FSR, T2, 0);
+  // Decode NarrowOop left by deoptimizer (see aload(int n) comment).
+  if (UseCompressedOops && CompressedOops::shift() != 0) {
+    Label L_ok;
+    __ dsrl32(AT, FSR, 0); __ bne(AT, R0, L_ok); __ delayed()->nop();
+    __ beq(FSR, R0, L_ok); __ delayed()->nop();
+    __ dsll(FSR, FSR, CompressedOops::shift());
+    if (CompressedOops::base() != NULL) __ daddu(FSR, FSR, S5_heapbase);
+    __ bind(L_ok);
+  }
 }
 
 void TemplateTable::locals_index_wide(Register reg) {
@@ -1005,6 +1014,21 @@ void TemplateTable::dload(int n) {
 void TemplateTable::aload(int n) {
   transition(vtos, atos);
   __ ld(FSR, aaddress(n));
+  // Decode any NarrowOop that the deoptimizer may have left in an oop-typed
+  // local variable slot (shift=3 heap: all full OOPs have non-zero upper 32 bits).
+  if (UseCompressedOops && CompressedOops::shift() != 0) {
+    Label L_aload_ok;
+    __ dsrl32(AT, FSR, 0);
+    __ bne(AT, R0, L_aload_ok);
+    __ delayed()->nop();
+    __ beq(FSR, R0, L_aload_ok);
+    __ delayed()->nop();
+    __ dsll(FSR, FSR, CompressedOops::shift());
+    if (CompressedOops::base() != NULL) {
+      __ daddu(FSR, FSR, S5_heapbase);
+    }
+    __ bind(L_aload_ok);
+  }
 }
 
 void TemplateTable::aload_0() {
@@ -1278,6 +1302,20 @@ void TemplateTable::aastore() {
   __ delayed()->nop();
 
   // Move subklass into T3
+  // Decode NarrowOop in FSR if necessary (QEMU shift=3 heap).
+  if (UseCompressedOops && CompressedOops::shift() != 0) {
+    Label L_aastore_oop_ok;
+    __ dsrl32(AT, FSR, 0);
+    __ bne(AT, R0, L_aastore_oop_ok);
+    __ delayed()->nop();
+    __ beq(FSR, R0, L_aastore_oop_ok);
+    __ delayed()->nop();
+    __ dsll(FSR, FSR, CompressedOops::shift());
+    if (CompressedOops::base() != NULL) {
+      __ daddu(FSR, FSR, S5_heapbase);
+    }
+    __ bind(L_aastore_oop_ok);
+  }
   //add for compressedoops
   __ load_klass(T3, FSR);
   // Move superklass into T8
@@ -3802,6 +3840,21 @@ void TemplateTable::prepare_invoke(int byte_no,
     const int receiver_is_at_end      = -1;  // back off one slot to get receiver
     Address recv_addr = __ argument_address(recv, no_return_pc_pushed_yet + receiver_is_at_end);
     __ ld(recv, recv_addr);
+    // Decode any NarrowOop in the receiver slot (upper 32 bits == 0 on QEMU shift=3 heap)
+    // so that null_check and load_klass see a valid full OOP.
+    if (UseCompressedOops && CompressedOops::shift() != 0) {
+      Label L_recv_decoded;
+      __ dsrl32(AT, recv, 0);
+      __ bne(AT, R0, L_recv_decoded);   // upper bits non-zero → full OOP
+      __ delayed()->nop();
+      __ beq(recv, R0, L_recv_decoded); // null → ok
+      __ delayed()->nop();
+      __ dsll(recv, recv, CompressedOops::shift());
+      if (CompressedOops::base() != NULL) {
+        __ daddu(recv, recv, S5_heapbase);
+      }
+      __ bind(L_recv_decoded);
+    }
     __ verify_oop(recv);
   }
   if(save_flags) {
@@ -4407,6 +4460,20 @@ void TemplateTable::checkcast() {
   __ bind(resolved);
 
   // get subklass in T2
+  // Decode NarrowOop in FSR (QEMU shift=3): zero upper 32 bits means NarrowOop.
+  if (UseCompressedOops && CompressedOops::shift() != 0) {
+    Label L_checkcast_oop_ok;
+    __ dsrl32(AT, FSR, 0);
+    __ bne(AT, R0, L_checkcast_oop_ok);
+    __ delayed()->nop();
+    __ beq(FSR, R0, L_checkcast_oop_ok);
+    __ delayed()->nop();
+    __ dsll(FSR, FSR, CompressedOops::shift());
+    if (CompressedOops::base() != NULL) {
+      __ daddu(FSR, FSR, S5_heapbase);
+    }
+    __ bind(L_checkcast_oop_ok);
+  }
   //add for compressedoops
   __ load_klass(T2, FSR);
   // Superklass in T3.  Subklass in T2.
@@ -4475,6 +4542,20 @@ void TemplateTable::instanceof() {
 
   __ bind(resolved);
   // get subklass in T2
+  // Decode NarrowOop in FSR (QEMU shift=3): zero upper 32 bits means NarrowOop.
+  if (UseCompressedOops && CompressedOops::shift() != 0) {
+    Label L_instanceof_oop_ok;
+    __ dsrl32(AT, FSR, 0);
+    __ bne(AT, R0, L_instanceof_oop_ok);
+    __ delayed()->nop();
+    __ beq(FSR, R0, L_instanceof_oop_ok);
+    __ delayed()->nop();
+    __ dsll(FSR, FSR, CompressedOops::shift());
+    if (CompressedOops::base() != NULL) {
+      __ daddu(FSR, FSR, S5_heapbase);
+    }
+    __ bind(L_instanceof_oop_ok);
+  }
   //add for compressedoops
   __ load_klass(T2, FSR);
 

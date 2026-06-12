@@ -810,7 +810,6 @@ oop ConstantPoolCache::set_dynamic_call(const CallInfo &call_info, int index) {
   assert(resolved_indy_entries() != nullptr, "Invokedynamic array is empty, cannot fill with resolved information");
   resolved_indy_entry_at(index)->fill_in(adapter, adapter->size_of_parameters(), as_TosState(adapter->result_type()), has_appendix);
 
-
   if (log_stream != nullptr) {
     resolved_indy_entry_at(index)->print_on(log_stream);
   }

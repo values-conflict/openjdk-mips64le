@@ -41,9 +41,9 @@ void C2SafepointPollStub::emit(C2_MacroAssembler& masm) {
   address stub = SharedRuntime::polling_page_return_handler_blob()->entry_point();
 
   __ bind(entry());
-  InternalAddress safepoint_pc(masm.pc() - masm.offset() + _safepoint_offset);
-  __ relocate(safepoint_pc.rspec());
-  __ li64(AT, (jlong)safepoint_pc.target());
+  address safepoint_pc = masm.pc() - masm.offset() + _safepoint_offset;
+  __ relocate(internal_word_Relocation::spec(safepoint_pc));
+  __ li64(AT, (jlong)safepoint_pc);
   __ sd(AT, TREG, in_bytes(JavaThread::saved_exception_pc_offset()));
   __ jmp(stub, relocInfo::runtime_call_type);
 }

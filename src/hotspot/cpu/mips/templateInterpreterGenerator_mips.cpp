@@ -428,6 +428,23 @@ address TemplateInterpreterGenerator::generate_return_entry_for(TosState state, 
   if (state == atos) {
     Register mdp = T8;
     Register tmp = T9;
+    // A C2-compiled callee may return a NarrowOop in FSR (upper 32 bits = 0) when
+    // CompressedOops shift != 0.  Decode before profile_return_type, which calls
+    // profile_obj_type → load_klass on FSR and would crash if FSR is a NarrowOop.
+    // Also decode before any atos→vtos transition pushes FSR via push_ptr (no decode).
+    if (UseCompressedOops && CompressedOops::shift() != 0) {
+      Label L_ret_oop_ok;
+      __ dsrl32(AT, FSR, 0);
+      __ bne(AT, R0, L_ret_oop_ok);   // upper bits non-zero → full OOP, done
+      __ delayed()->nop();
+      __ beq(FSR, R0, L_ret_oop_ok);  // null → ok as-is
+      __ delayed()->nop();
+      __ dsll(FSR, FSR, CompressedOops::shift());
+      if (CompressedOops::base() != NULL) {
+        __ daddu(FSR, FSR, S5_heapbase);
+      }
+      __ bind(L_ret_oop_ok);
+    }
     __ profile_return_type(mdp, FSR, tmp);
   }
 
@@ -486,6 +503,22 @@ address TemplateInterpreterGenerator::generate_deopt_entry_for(TosState state,
     __ call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::throw_pending_exception));
     __ should_not_reach_here();
     __ bind(L);
+  }
+  // Decode NarrowOop in FSR for atos: a deoptimized C2 frame may leave a NarrowOop
+  // (upper 32 bits = 0) in V0/FSR when CompressedOops shift != 0.  Decode before
+  // dispatch so that profile_return_type and subsequent push_ptr see a full OOP.
+  if (state == atos && UseCompressedOops && CompressedOops::shift() != 0) {
+    Label L_deopt_oop_ok;
+    __ dsrl32(AT, FSR, 0);
+    __ bne(AT, R0, L_deopt_oop_ok);
+    __ delayed()->nop();
+    __ beq(FSR, R0, L_deopt_oop_ok);
+    __ delayed()->nop();
+    __ dsll(FSR, FSR, CompressedOops::shift());
+    if (CompressedOops::base() != NULL) {
+      __ daddu(FSR, FSR, S5_heapbase);
+    }
+    __ bind(L_deopt_oop_ok);
   }
   if (continuation == NULL) {
     __ dispatch_next(state, step);
@@ -2091,4 +2124,26 @@ address TemplateInterpreterGenerator::generate_cont_resume_interpreter_adapter()
   __ delayed()->nop();
 
   return start;
+}
+
+// Float16 intrinsics: not supported on MIPS (no hardware float16 instructions).
+address TemplateInterpreterGenerator::generate_Float_float16ToFloat_entry() {
+  return nullptr;
+}
+
+address TemplateInterpreterGenerator::generate_Float_floatToFloat16_entry() {
+  return nullptr;
+}
+
+// java.lang.Thread.currentThread() intrinsic entry.
+// Returns the current virtual thread (or platform thread if no vthread pinned).
+// Result must be in FSR (= V0), which is the MIPS interpreter's atos return register.
+address TemplateInterpreterGenerator::generate_currentThread() {
+  address entry_point = __ pc();
+  __ ld(V0, Address(TREG, JavaThread::vthread_offset()));
+  __ resolve_oop_handle(V0, T1, T2);
+  __ move(SP, Rsender);  // restore caller's SP (no parameters, but required by convention)
+  __ jr(RA);
+  __ delayed()->nop();
+  return entry_point;
 }

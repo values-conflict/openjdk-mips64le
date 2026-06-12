@@ -235,6 +235,38 @@ bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
         thread->stack_base() - thread->stack_size());
         */
 #endif
+      // Loongson-3 kernel 4.19 always reports si_addr=0 with si_code=SI_KERNEL
+      // (128) for null-page faults, including stack guard page hits from the
+      // C2/interpreter stack-bang probes.  Recover the actual fault address ONLY
+      // for stack-bang instructions, which use SP ($29) as the base register:
+      //   sw A0, -N(SP)   (small offset)
+      //   sw A0, 0(AT)    (large offset, AT = SP - N, handled separately)
+      // For other memory accesses (null-OOP dereferences using non-SP base
+      // registers), leave addr=0 so they fall through to implicit null check
+      // handling.  Checking only SP-based stores prevents false SOE from null
+      // dereferences whose fault address coincidentally lands in the guard zone.
+      if (addr == 0 && info->si_code == 128 /* SI_KERNEL */) {
+        uint32_t insn = *(uint32_t*)pc;
+        int base_reg  = (insn >> 21) & 0x1f;
+        int16_t imm16 = (int16_t)(insn & 0xffff);
+        if (base_reg == REG_SP) {
+          // Small-offset stack-bang probe: base is SP, imm is negative.
+          address sp    = (address)(intptr_t)uc->uc_mcontext.gregs[REG_SP];
+          address fault = sp + imm16;
+          if (thread->stack_overflow_state()->in_stack_yellow_reserved_zone(fault) ||
+              thread->stack_overflow_state()->in_stack_red_zone(fault)) {
+            addr = fault;
+          }
+        } else if (base_reg == 1 /* AT */ && imm16 == 0) {
+          // Large-offset stack-bang probe: AT = SP - N, store is sw reg, 0(AT).
+          // AT holds the probe address directly.
+          address fault = (address)(intptr_t)uc->uc_mcontext.gregs[1];
+          if (thread->stack_overflow_state()->in_stack_yellow_reserved_zone(fault) ||
+              thread->stack_overflow_state()->in_stack_red_zone(fault)) {
+            addr = fault;
+          }
+        }
+      }
 
       // check if fault address is within thread stack
       if (thread->is_in_full_stack(addr)) {

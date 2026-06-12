@@ -30,6 +30,8 @@
 #include "runtime/jniHandles.hpp"
 #ifdef COMPILER2
 #include "gc/shared/c2/barrierSetC2.hpp"
+#include "opto/regmask.hpp"
+#include "opto/node.hpp"
 #endif // COMPILER2
 
 #define __ masm->
@@ -228,16 +230,56 @@ void BarrierSetAssembler::copy_store_at(MacroAssembler* masm,
 
 #ifdef COMPILER2
 
+OptoReg::Name BarrierSetAssembler::refine_register(const Node* node, OptoReg::Name opto_reg) {
+  if (!OptoReg::is_reg(opto_reg)) {
+    return OptoReg::Bad;
+  }
+  const VMReg vm_reg = OptoReg::as_VMReg(opto_reg);
+  if (vm_reg->is_FloatRegister()) {
+    return opto_reg & ~1;
+  }
+  return opto_reg;
+}
+
+// Push/pop all registers in a RegSet (MIPS has no push(RegSet) method).
+static void push_reg_set(MacroAssembler* masm, RegSet regs) {
+  int count = 0;
+  for (RegSetIterator<Register> it = regs.begin(); *it != noreg; ++it) count++;
+  if (count == 0) return;
+  masm->daddiu(SP, SP, -(count * wordSize));
+  int off = 0;
+  for (RegSetIterator<Register> it = regs.begin(); *it != noreg; ++it) {
+    masm->sd(*it, SP, off);
+    off += wordSize;
+  }
+}
+
+static void pop_reg_set(MacroAssembler* masm, RegSet regs) {
+  int count = 0;
+  for (RegSetIterator<Register> it = regs.begin(); *it != noreg; ++it) count++;
+  if (count == 0) return;
+  int off = 0;
+  for (RegSetIterator<Register> it = regs.begin(); *it != noreg; ++it) {
+    masm->ld(*it, SP, off);
+    off += wordSize;
+  }
+  masm->daddiu(SP, SP, count * wordSize);
+}
+
 void SaveLiveRegisters::initialize(BarrierStubC2* stub) {
   RegSet gp_regs;
   FloatRegSet fp_regs;
 
-  for (int i = 0; i < stub->live_count(); i++) {
-    VMReg r = stub->live_at(i);
-    if (r->is_Register()) {
-      gp_regs += RegSet::of(r->as_Register());
-    } else if (r->is_FloatRegister()) {
-      fp_regs += FloatRegSet::of(r->as_FloatRegister());
+  RegMaskIterator rmi(stub->preserve_set());
+  while (rmi.has_next()) {
+    const OptoReg::Name opto_reg = rmi.next();
+    if (OptoReg::is_reg(opto_reg)) {
+      const VMReg vm_reg = OptoReg::as_VMReg(opto_reg);
+      if (vm_reg->is_Register()) {
+        gp_regs += RegSet::of(vm_reg->as_Register());
+      } else if (vm_reg->is_FloatRegister()) {
+        fp_regs += FloatRegSet::of(vm_reg->as_FloatRegister());
+      }
     }
   }
 
@@ -247,13 +289,13 @@ void SaveLiveRegisters::initialize(BarrierStubC2* stub) {
 
 SaveLiveRegisters::SaveLiveRegisters(MacroAssembler* masm, BarrierStubC2* stub) : _masm(masm) {
   initialize(stub);
-  __ push(_gp_regs);
+  push_reg_set(masm, _gp_regs);
   // TODO: push float registers
 }
 
 SaveLiveRegisters::~SaveLiveRegisters() {
   // TODO: pop float registers
-  __ pop(_gp_regs);
+  pop_reg_set(_masm, _gp_regs);
 }
 
 #endif // COMPILER2

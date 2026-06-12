@@ -382,7 +382,7 @@ static int reg2offset_out(VMReg r) {
 // as framesizes are fixed.
 // VMRegImpl::stack0 refers to the first slot 0(sp).
 // and VMRegImpl::stack0+1 refers to the memory word 4-byes higher.  Register
-// up to RegisterImpl::number_of_registers) are the 32-bit
+// up to Register::number_of_registers) are the 32-bit
 // integer registers.
 
 // Pass first five oop/int args in registers T0, A0 - A3.
@@ -597,6 +597,23 @@ static void gen_c2i_adapter(MacroAssembler *masm,
       }
     } else if (r_1->is_Register()) {
       Register r = r_1->as_Register();
+      if (sig_bt[i] == T_OBJECT && UseCompressedOops && CompressedOops::shift() != 0) {
+        // When a T_OBJECT argument arrives from compiled code with upper 32 bits == 0,
+        // it is a NarrowOop that was never decoded (e.g. due to a safepoint between
+        // LoadN and DecodeN causing deopt with the undecoded value).  Detect and fix
+        // this before storing to the interpreter frame: objects on QEMU's large heap
+        // (shift=3) always have addresses > 4 GB, so any full OOP will have non-zero
+        // upper 32 bits; zero upper 32 bits unambiguously identifies a NarrowOop.
+        Label L_already_decoded;
+        __ dsrl32(AT, r, 0);
+        __ bne(AT, R0, L_already_decoded);
+        __ delayed()->nop();
+        __ dsll(r, r, CompressedOops::shift());
+        if (CompressedOops::base() != NULL) {
+          __ daddu(r, r, S5_heapbase);
+        }
+        __ bind(L_already_decoded);
+      }
       if (!r_2->is_valid()) {
           __ sd(r, SP, st_off);
       } else {
@@ -806,6 +823,24 @@ void SharedRuntime::gen_i2c_adapter(MacroAssembler *masm,
         //
         if (sig_bt[i] == T_LONG)
           __ ld(r, saved_sp, ld_off - 8);
+
+        // When a T_OBJECT value arrives from the interpreter stack with upper 32 bits
+        // == 0, it is a NarrowOop that was stored undecoded (e.g. by the deoptimizer
+        // when a safepoint occurred between LoadN and DecodeN in compiled code).
+        // Detect and fix: on QEMU (shift=3, heap > 4 GB) every legitimate full OOP
+        // has a non-zero upper 32 bits, so zero upper 32 bits unambiguously identifies
+        // an undecoded NarrowOop.
+        if (sig_bt[i] == T_OBJECT && UseCompressedOops && CompressedOops::shift() != 0) {
+          Label L_already_decoded;
+          __ dsrl32(AT, r, 0);
+          __ bne(AT, R0, L_already_decoded);
+          __ delayed()->nop();
+          __ dsll(r, r, CompressedOops::shift());
+          if (CompressedOops::base() != NULL) {
+            __ daddu(r, r, S5_heapbase);
+          }
+          __ bind(L_already_decoded);
+        }
       } else {
         __ lw(r, saved_sp, ld_off);
       }
@@ -2087,12 +2122,12 @@ nmethod *SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   // map->set_callee_saved(VMRegImpl::stack2reg( stack_slots - 2), stack_slots * 2, 0, vmreg(fp));
 
 #ifdef ASSERT
-  bool reg_destroyed[RegisterImpl::number_of_registers];
-  bool freg_destroyed[FloatRegisterImpl::number_of_registers];
-  for ( int r = 0 ; r < RegisterImpl::number_of_registers ; r++ ) {
+  bool reg_destroyed[Register::number_of_registers];
+  bool freg_destroyed[FloatRegister::number_of_registers];
+  for ( int r = 0 ; r < Register::number_of_registers ; r++ ) {
     reg_destroyed[r] = false;
   }
-  for ( int f = 0 ; f < FloatRegisterImpl::number_of_registers ; f++ ) {
+  for ( int f = 0 ; f < FloatRegister::number_of_registers ; f++ ) {
     freg_destroyed[f] = false;
   }
 
@@ -3050,7 +3085,7 @@ void SharedRuntime::generate_deopt_blob() {
 //------------------------------generate_uncommon_trap_blob--------------------
 // Ought to generate an ideal graph & compile, but here's some SPARC ASM
 // instead.
-void SharedRuntime::generate_uncommon_trap_blob() {
+UncommonTrapBlob* OptoRuntime::generate_uncommon_trap_blob() {
   // allocate space for the code
   ResourceMark rm;
   // setup code generation tools
@@ -3164,7 +3199,7 @@ void SharedRuntime::generate_uncommon_trap_blob() {
 
   // Load array of frame sizes
   __ ld(sizes, unroll, in_bytes(Deoptimization::UnrollBlock::frame_sizes_offset()));
-  __ lwu(count, unroll, Deoptimization::UnrollBlock::number_of_frames_offset());
+  __ lwu(count, unroll, in_bytes(Deoptimization::UnrollBlock::number_of_frames_offset()));
 
   // Pick up the initial fp we should save
   __ ld(FP, unroll, in_bytes(Deoptimization::UnrollBlock::initial_info_offset()));
@@ -3232,7 +3267,7 @@ void SharedRuntime::generate_uncommon_trap_blob() {
   // make sure all code is generated
   masm->flush();
 
-  _uncommon_trap_blob = UncommonTrapBlob::create(&buffer, oop_maps, framesize / 2);
+  return UncommonTrapBlob::create(&buffer, oop_maps, framesize / 2);
 }
 
 #endif // COMPILER2
@@ -3730,16 +3765,6 @@ void SharedRuntime::montgomery_square(jint *a_ints, jint *n_ints,
 
   reverse_words(m, (unsigned long *)m_ints, longwords);
 }
-
-#ifdef COMPILER2
-RuntimeStub* SharedRuntime::make_native_invoker(address call_target,
-                                                int shadow_space_bytes,
-                                                const GrowableArray<VMReg>& input_registers,
-                                                const GrowableArray<VMReg>& output_registers) {
-  Unimplemented();
-  return nullptr;
-}
-#endif
 
 // JFR stubs - not yet implemented for MIPS64
 RuntimeStub* SharedRuntime::generate_jfr_write_checkpoint() {

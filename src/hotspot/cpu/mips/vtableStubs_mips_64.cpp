@@ -218,9 +218,9 @@ VtableStub* VtableStubs::create_itable_stub(int itable_index) {
   const Register resolved_klass_reg = Rmethod; // resolved interface klass (REFC)
 
   const Register icholder_reg = T1;
-  // CompiledICHolder → CompiledICData in jdk25u
-  __ ld_ptr(resolved_klass_reg, icholder_reg, in_bytes(CompiledICData::speculated_klass_offset()));
-  __ ld_ptr(holder_klass_reg,   icholder_reg, in_bytes(CompiledICData::speculated_method_offset()));
+  // CompiledICData in jdk25u: use itable_refc/defc_klass fields for correct dispatch.
+  __ ld_ptr(resolved_klass_reg, icholder_reg, in_bytes(CompiledICData::itable_refc_klass_offset()));
+  __ ld_ptr(holder_klass_reg,   icholder_reg, in_bytes(CompiledICData::itable_defc_klass_offset()));
 
   Label L_no_such_interface;
 

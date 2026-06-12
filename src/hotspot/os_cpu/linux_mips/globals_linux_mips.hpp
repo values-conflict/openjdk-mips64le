@@ -32,9 +32,14 @@
 define_pd_global(bool, DontYieldALot,            false);
 #ifdef MIPS64
 // jdk25u requires more stack for VM initialization than jdk17u (Loom, JFR, new CP cache).
-// 2048 KB matches RISC-V and gives adequate headroom beyond the 80KB shadow zone.
-define_pd_global(intx, ThreadStackSize,          2048); // 0 => use system default
-define_pd_global(intx, VMThreadStackSize,        2048);
+// With C2 JIT enabled, compiled frames are larger (more register spill slots due to
+// S6/TREG and S5/heapbase exclusion from alloc_class), increasing stack usage during
+// boot layer init and single-source file launch (which invokes javac internally).
+// 8192 KB gives enough headroom for module initialization (loading 70+ JDK modules)
+// and javac compilation of the phase test source files under QEMU emulation.
+// Hardware uses the same value; the target Loongson-3 has 7.5 GB RAM.
+define_pd_global(intx, ThreadStackSize,          8192); // 0 => use system default
+define_pd_global(intx, VMThreadStackSize,        8192);
 #else
 // ThreadStackSize 320 allows a couple of test cases to run while
 // keeping the number of threads that can be created high.  System

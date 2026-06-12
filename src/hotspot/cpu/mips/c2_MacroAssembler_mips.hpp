@@ -47,6 +47,10 @@ public:
 
   void fast_lock(Register obj, Register box, Register res, Register tmp, Register scr);
   void fast_unlock(Register obj, Register box, Register res, Register tmp, Register scr);
+  void fast_lock_lightweight(Register obj, Register box, Register flag,
+                             Register tmp1, Register tmp2, Register tmp3, Register tmp4);
+  void fast_unlock_lightweight(Register obj, Register box, Register flag,
+                               Register tmp1, Register tmp2, Register tmp3);
 
   // For C2 to support long branches
   void beq_long   (Register rs, Register rt, Label& L);

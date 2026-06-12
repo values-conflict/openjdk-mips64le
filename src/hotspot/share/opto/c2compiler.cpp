@@ -75,6 +75,30 @@ bool C2Compiler::init_c2_runtime() {
   Compile::adlc_verification();
   assert(REG_COUNT <= ConcreteRegisterImpl::number_of_registers, "incompatible register counts");
 
+#if defined(MIPS64)
+  // TEMPORARY WORKAROUND -- MUST REMOVE before declaring port complete.
+  // Fix in: Phase 7 (port cleanup; depends on build-system investigation).
+  //
+  // GCC 12 on MIPS64el places OptoReg::opto2vm in BSS with no runtime
+  // initialization: the ADLC-generated static initializer references
+  // all_VMRegs via GOT entries that lack R_MIPS_REL32 relocations in
+  // ad_mips.cpp, so they resolve to zero and the array is never filled.
+  //
+  // Fix: call mips_opto2vm_fill() here, passing the private array via
+  // C2Compiler's existing friend access to OptoReg.  The fill function
+  // lives in c2_init_mips.cpp (a MIPS-specific file) where all_VMRegs
+  // has correct GOT entries.
+  //
+  // Proper long-term fix: address the GCC 12 BSS/GOT issue at the build
+  // system level (e.g. a linker script attribute or compiler flag that
+  // forces correct R_MIPS_REL32 relocations for internal symbols in
+  // ad_mips.cpp), then remove this block and mips_opto2vm_fill().
+  {
+    extern void mips_opto2vm_fill(VMReg* p, int count);
+    mips_opto2vm_fill(const_cast<VMReg*>(OptoReg::opto2vm), REG_COUNT);
+  }
+#endif
+
   for (int i = 0; i < ConcreteRegisterImpl::number_of_registers ; i++ ) {
       OptoReg::vm2opto[i] = OptoReg::Bad;
   }

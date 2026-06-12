@@ -45,6 +45,7 @@ inline frame::frame() {
   _cb = nullptr;
   _oop_map = nullptr;
   _deopt_state = unknown;
+  DEBUG_ONLY(_frame_index = -1;)
 }
 
 inline void frame::init(intptr_t* sp, intptr_t* fp, address pc) {
@@ -53,6 +54,7 @@ inline void frame::init(intptr_t* sp, intptr_t* fp, address pc) {
   _fp = fp;
   _pc = pc;
   _oop_map = nullptr;
+  DEBUG_ONLY(_frame_index = -1;)
   assert(pc != nullptr, "no pc?");
   _cb = CodeCache::find_blob(pc);
   adjust_unextended_sp();
@@ -71,6 +73,7 @@ inline frame::frame(intptr_t* sp, intptr_t* fp, address pc) {
 }
 
 inline frame::frame(intptr_t* sp, intptr_t* unextended_sp, intptr_t* fp, address pc) {
+  DEBUG_ONLY(_frame_index = -1;)
   _sp = sp;
   _unextended_sp = unextended_sp;
   _fp = fp;
@@ -90,6 +93,7 @@ inline frame::frame(intptr_t* sp, intptr_t* unextended_sp, intptr_t* fp, address
 }
 
 inline frame::frame(intptr_t* sp, intptr_t* unextended_sp, intptr_t* fp, address pc, CodeBlob* cb) {
+  DEBUG_ONLY(_frame_index = -1;)
   _sp = sp;
   _unextended_sp = unextended_sp;
   _fp = fp;
@@ -101,6 +105,7 @@ inline frame::frame(intptr_t* sp, intptr_t* unextended_sp, intptr_t* fp, address
 }
 
 inline frame::frame(intptr_t* sp, intptr_t* unextended_sp, intptr_t* fp, address pc, CodeBlob* cb, const ImmutableOopMap* oop_map, bool on_heap) {
+  DEBUG_ONLY(_frame_index = -1;)
   _sp = sp;
   _unextended_sp = unextended_sp;
   _fp = fp;
@@ -130,6 +135,7 @@ inline void frame::setup(address pc) {
 }
 
 inline frame::frame(intptr_t* sp, intptr_t* fp) {
+  DEBUG_ONLY(_frame_index = -1;)
   _sp = sp;
   _unextended_sp = sp;
   _fp = fp;
@@ -442,6 +448,13 @@ inline frame frame::sender_raw(RegisterMap* map) const {
   intptr_t* sender_fp = (intptr_t*) at(link_offset);
   address   sender_pc = (address) at(return_addr_offset);
   return frame(sender_sp, sender_fp, sender_pc);
+}
+
+inline void frame::interpreted_frame_oop_map(InterpreterOopMap* mask) const {
+  assert(mask != nullptr, "");
+  Method* m = interpreter_frame_method();
+  int   bci = interpreter_frame_bci();
+  m->mask_for(bci, mask);
 }
 
 #endif // CPU_MIPS_FRAME_MIPS_INLINE_HPP

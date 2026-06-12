@@ -1681,10 +1681,14 @@ void PhaseOutput::fill_buffer(C2_MacroAssembler* masm, uint* blk_starts) {
               }
             }
           }
-        } else if (!n->is_Proj()) {
+        } else if (!n->is_Proj() && !n->is_MachSpillCopy()) {
           // Remember the beginning of the previous instruction, in case
           // it's followed by a flag-kill and a null-check.  Happens on
           // Intel all the time, with add-to-memory kind of opcodes.
+          // Skip allocator-inserted spill copies: they are not the instruction
+          // being null-checked, and updating previous_offset here would cause
+          // the MachNullCheck to record the copy's PC instead of the actual
+          // load/store instruction's PC, corrupting the null-check table.
           previous_offset = current_offset;
         }
 

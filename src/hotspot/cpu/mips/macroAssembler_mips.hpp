@@ -131,6 +131,7 @@ class MacroAssembler: public Assembler {
 
   // Alignment
   void align(int modulus);
+  void align(int modulus, int target);
 
 
   // Stack frame creation/removal

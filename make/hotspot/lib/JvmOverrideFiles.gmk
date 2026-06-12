@@ -35,6 +35,24 @@ ifeq ($(TOOLCHAIN_TYPE), gcc)
   BUILD_LIBJVM_vmStructs.cpp_CXXFLAGS := -fno-var-tracking-assignments
   BUILD_LIBJVM_jvmciCompilerToVM.cpp_CXXFLAGS := -fno-var-tracking-assignments
   BUILD_LIBJVM_jvmciCompilerToVMInit.cpp_CXXFLAGS := -fno-var-tracking-assignments
+  ifeq ($(OPENJDK_TARGET_CPU), mips64el)
+    # TEMPORARY WORKAROUND -- MUST REMOVE before declaring port complete.
+    #
+    # GCC 12 on MIPS64el (-fvisibility=hidden + -fPIC) omits the GP restore on
+    # the branch-taken path after calls to hidden local functions, treating them
+    # as if they preserve GP.  They do -- except on the non-early-exit path where
+    # they use daddu gp,gp,t9 with a fresh T9, then save and restore the caller's
+    # GP on return.  When the jump goes directly to the true-path code without
+    # restoring GP first, subsequent GOT-relative loads get wrong opto2vm and
+    # all_VMRegs addresses, making r->value() enormous and crashing the vm2opto
+    # store.  -O0 forces a GP restore (ld gp,N(sp)) after every call.
+    #
+    # Proper fix: address the underlying GCC 12 GOT/GP issue in the build system
+    # (e.g. a compiler flag that forces correct GP restore after every call to
+    # a non-leaf function), then remove this -O0 override and the associated
+    # PCH exclusion below.  This is tied to the MIPS64 block in c2compiler.cpp.
+    BUILD_LIBJVM_c2compiler.cpp_CXXFLAGS := -O0
+  endif
   ifeq ($(DEBUG_LEVEL), release)
     # Need extra inlining to collapse shared marking code into the hot marking loop
     BUILD_LIBJVM_shenandoahMark.cpp_CXXFLAGS := --param inline-unit-growth=1000
@@ -150,6 +168,13 @@ else ifeq ($(call isTargetOs, windows), true)
 endif
 
 ################################################################################
+# MIPS64el: exclude c2compiler.cpp from the precompiled header because it uses
+# -O0 (which changes the optimisation level and makes the PCH incompatible).
+# TEMPORARY WORKAROUND -- MUST REMOVE before declaring port complete (same as the
+# -O0 override above: remove both when the GCC 12 GP-restore issue is resolved).
+ifeq ($(OPENJDK_TARGET_CPU), mips64el)
+  JVM_PRECOMPILED_HEADER_EXCLUDE += c2compiler.cpp
+endif
 
 endif # include guard
 include MakeIncludeEnd.gmk

@@ -72,182 +72,240 @@ static void write_barrier_post(MacroAssembler* masm,
   g1_asm->g1_write_barrier_post_c2(masm, store_addr, new_val, TREG, tmp1, tmp2, stub);
 }
 
+// Unconditional G1 post-barrier: forces the card dirty AND inserts into the dirty
+// card queue so G1 refinement threads update the remembered set.  Used when the
+// stub-based write_barrier_post cannot be called (barrier_data=0 asserts in
+// BarrierStubC2::BarrierStubC2).  This replicates what generate_post_barrier_slow_path
+// does, minus the "already dirty?" fast-path check and with no runtime call for
+// queue-full (we simply leave the card dirty; GC scans dirty cards at collection time).
+// Without queue insertion, G1 young GC would miss the old→young reference (no
+// remembered-set entry) and collect the live node → HashMap.getNode() crash.
+//
+// K0 = card address (output), K1 = scratch (index/buffer).  AT = buffer base.
+// Passed tmp1/tmp2 parameters are ignored; K0 and K1 are used directly.
+static void force_card_dirty(MacroAssembler* masm,
+                              Register store_addr,
+                              Register /* ignored_tmp1 */,
+                              Register /* ignored_tmp2 */) {
+  CardTableBarrierSet* ctbs = barrier_set_cast<CardTableBarrierSet>(BarrierSet::barrier_set());
+  CardTable* ct = ctbs->card_table();
+
+  // Compute card address → K0
+  __ dsrl(K0, store_addr, (int)CardTable::card_shift());
+  __ set64(K1, (intptr_t)ct->byte_map_base());
+  __ daddu(K0, K0, K1);                // K0 = card address
+
+  __ sync();                           // StoreLoad barrier
+  __ lbu(K1, Address(K0));             // K1 = current card value
+
+  Label done;
+  __ beq(K1, R0, done); __ delayed()->nop();  // already dirty → skip
+
+  STATIC_ASSERT(CardTable::dirty_card_val() == 0);
+  __ sb(R0, Address(K0));              // dirty the card
+  __ sync();                           // ensure card-dirty visible before queue insert
+
+  // Insert K0 (card address) into G1 dirty card queue.
+  // Queue full (index=0): skip insertion (card is dirty; GC scans dirty cards at collection).
+  __ ld(K1, Address(TREG, in_bytes(G1ThreadLocalData::dirty_card_queue_index_offset())));
+  __ beq(K1, R0, done); __ delayed()->nop();  // index=0 → queue full, skip
+  __ daddiu(K1, K1, -wordSize);               // decrement index
+  __ sd(K1, Address(TREG, in_bytes(G1ThreadLocalData::dirty_card_queue_index_offset())));
+  __ ld(AT, Address(TREG, in_bytes(G1ThreadLocalData::dirty_card_queue_buffer_offset())));
+  __ daddu(K1, AT, K1);                       // K1 = &buffer[new_index]
+  __ sd(K0, Address(K1));                     // buffer[new_index] = card_address
+
+  __ bind(done);
+}
+
 %}
 
-instruct g1StoreP(indirect mem, mRegP src, mRegP tmp1, mRegP tmp2, mRegP tmp3)
+// Note on volatile stores: MIPS handles volatile semantics through MemBarRelease
+// nodes (which emit sync instructions) surrounding the store, rather than through
+// AMO instructions.  The G1 barrier instructs below therefore apply to both
+// volatile and non-volatile stores without distinction.
+
+instruct g1StoreP(indirect mem, mRegP src)
 %{
-  predicate(UseG1GC && !needs_releasing_store(n) && n->as_Store()->barrier_data() != 0);
+  predicate(UseG1GC && n->as_Store()->barrier_data() != 0);
   match(Set mem (StoreP mem src));
-  effect(TEMP tmp1, TEMP tmp2, TEMP tmp3);
+  // No named TEMPs: K0, K1, and AT are C2-invisible scratch registers not in any
+  // live range, so they can never create a stale-liveness interference conflict.
+  effect();
   ins_cost(125);
-  format %{ "sd    $src, [$mem]\t# TEMP($tmp1, $tmp2, $tmp3) @g1StoreP" %}
+  format %{ "sd    $src, [$mem]\t# @g1StoreP" %}
   ins_encode %{
     guarantee($mem$$disp == 0, "impossible encoding");
-    write_barrier_pre(masm, this,
-                      $mem$$Register  /* obj */,
-                      $tmp1$$Register /* pre_val */,
-                      $tmp2$$Register /* tmp1 */,
-                      $tmp3$$Register /* tmp2 */,
-                      RegSet::of($mem$$Register, $src$$Register) /* preserve */);
-    __ loadstore_enc($src$$Register, $mem$$base, $mem$$index, $mem$$scale, $mem$$disp, C2_MacroAssembler::STORE_LONG);
-    write_barrier_post(masm, this,
-                       $mem$$Register  /* store_addr */,
-                       $src$$Register  /* new_val */,
-                       $tmp2$$Register /* tmp1 */,
-                       $tmp3$$Register /* tmp2 */);
+    __ ld(K0, $mem$$Register, 0);               // (1) old value: null-check + SATB
+    __ sd($src$$Register, $mem$$Register, 0);   // (2) store
+    write_barrier_pre(masm, this, noreg, K0, AT, K1,
+                      RegSet::of($mem$$Register, $src$$Register));  // (3) pre-barrier
+    __ decode_heap_oop(AT, $src$$Register);     // (4) AT = decoded new OOP
+    write_barrier_post(masm, this, $mem$$Register, AT, K0, K1); // (5)
   %}
   ins_pipe(pipe_slow);
 %}
 
-instruct g1StorePVolatile(indirect mem, mRegP src, mRegP tmp1, mRegP tmp2, mRegP tmp3)
+instruct g1StoreN(indirect mem, mRegN src)
 %{
-  predicate(UseG1GC && needs_releasing_store(n) && n->as_Store()->barrier_data() != 0);
-  match(Set mem (StoreP mem src));
-  effect(TEMP tmp1, TEMP tmp2, TEMP tmp3);
-  ins_cost(130);
-  format %{ "amswap_db_d    R0, $src, $mem # @g1StoreP" %}
-  ins_encode %{
-    write_barrier_pre(masm, this,
-                      $mem$$Register /* obj */,
-                      $tmp1$$Register /* pre_val */,
-                      $tmp2$$Register /* tmp1 */,
-                      $tmp3$$Register /* tmp2 */,
-                      RegSet::of($mem$$Register, $src$$Register) /* preserve */);
-    __ amswap_db_d(R0, $src$$Register, as_Register($mem$$base));
-    write_barrier_post(masm, this,
-                       $mem$$Register /* store_addr */,
-                       $src$$Register /* new_val */,
-                       $tmp2$$Register /* tmp1 */,
-                       $tmp3$$Register /* tmp2 */);
-  %}
-  ins_pipe(pipe_slow);
-%}
-
-instruct g1StoreN(indirect mem, mRegN src, mRegP tmp1, mRegP tmp2, mRegP tmp3)
-%{
-  predicate(UseG1GC && !needs_releasing_store(n) && n->as_Store()->barrier_data() != 0);
+  // UseG1GC only — no barrier_data check.  See g1StoreNIndOffset8 for rationale.
+  // No named TEMPs: K0, K1, AT are C2-invisible; see g1StoreP for the full rationale.
+  predicate(UseG1GC);
   match(Set mem (StoreN mem src));
-  effect(TEMP tmp1, TEMP tmp2, TEMP tmp3);
+  effect();
   ins_cost(125);
-  format %{ "st_w    $src, [$mem]\t# TEMP($tmp1, $tmp2, $tmp3) @g1StoreN" %}
+  format %{ "sw    $src, [$mem]\t# @g1StoreN" %}
   ins_encode %{
     guarantee($mem$$disp == 0, "impossible encoding");
-    write_barrier_pre(masm, this,
-                      $mem$$Register  /* obj */,
-                      $tmp1$$Register /* pre_val */,
-                      $tmp2$$Register /* tmp1 */,
-                      $tmp3$$Register /* tmp2 */,
-                      RegSet::of($mem$$Register, $src$$Register) /* preserve */);
-    __ loadstore_enc($src$$Register, $mem$$base, $mem$$index, $mem$$scale, $mem$$disp, C2_MacroAssembler::STORE_INT);
-    if ((barrier_data() & G1C2BarrierPost) != 0) {
+    __ lwu(K0, $mem$$Register, 0);              // (1) old narrow OOP: null-check + SATB
+    __ sw($src$$Register, $mem$$Register, 0);   // (2) store
+    write_barrier_pre(masm, this, noreg, K0, AT, K1,
+                      RegSet::of($mem$$Register, $src$$Register));  // (3) pre-barrier
+    if ((barrier_data() & G1C2BarrierPost) != 0) {  // (4) post-barrier
       if ((barrier_data() & G1C2BarrierPostNotNull) == 0) {
-        __ decode_heap_oop($tmp1$$Register, $src$$Register);
+        __ decode_heap_oop(AT, $src$$Register);
       } else {
-        __ decode_heap_oop_not_null($tmp1$$Register, $src$$Register);
+        __ decode_heap_oop_not_null(AT, $src$$Register);
       }
+      write_barrier_post(masm, this, $mem$$Register, AT, K0, K1);
+    } else {
+      force_card_dirty(masm, $mem$$Register, K0, K1);
     }
-    write_barrier_post(masm, this,
-                       $mem$$Register  /* store_addr */,
-                       $tmp1$$Register /* new_val */,
-                       $tmp2$$Register /* tmp1 */,
-                       $tmp3$$Register /* tmp2 */);
   %}
   ins_pipe(pipe_slow);
 %}
 
-instruct g1StoreNVolatile(indirect mem, mRegN src, mRegP tmp1, mRegP tmp2, mRegP tmp3)
+instruct g1EncodePAndStoreN(indirect mem, mRegP src)
 %{
-  predicate(UseG1GC && needs_releasing_store(n) && n->as_Store()->barrier_data() != 0);
+  // UseG1GC only — no barrier_data check.  See g1StoreNIndOffset8 for rationale.
+  // No named TEMPs: K0, K1, AT are C2-invisible; see g1StoreP for the full rationale.
+  predicate(UseG1GC);
+  match(Set mem (StoreN mem (EncodeP src)));
+  effect();
+  ins_cost(125);
+  format %{ "encodeP_and_storeN    $src, [$mem]\t# @g1EncodePAndStoreN" %}
+  ins_encode %{
+    guarantee($mem$$disp == 0, "impossible encoding");
+    __ lwu(K0, $mem$$Register, 0);              // (1) old narrow OOP: null-check + SATB
+    write_barrier_pre(masm, this, noreg, K0, AT, K1,
+                      RegSet::of($mem$$Register, $src$$Register));  // (2) pre-barrier
+    // (3) Encode new OOP into AT (C2-invisible, safe to use as scratch for encode+store).
+    if ((barrier_data() & G1C2BarrierPostNotNull) == 0) {
+      __ encode_heap_oop(AT, $src$$Register);
+    } else {
+      __ encode_heap_oop_not_null(AT, $src$$Register);
+    }
+    __ sw(AT, $mem$$Register, 0);               // (4) store encoded OOP
+    if ((barrier_data() & G1C2BarrierPost) != 0) {  // (5) post-barrier
+      write_barrier_post(masm, this, $mem$$Register, $src$$Register, K0, K1);
+    } else {
+      force_card_dirty(masm, $mem$$Register, K0, K1);
+    }
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+// G1 NarrowOop store with small offset (e.g. array element: tab_base + header_offset).
+// g1StoreN only handles indirect (zero-offset) memory, so array element stores using
+// indOffset8 would fall through to storeN (no barrier).  These variants cover the
+// non-zero-offset case by computing the effective field address into a dedicated tmp4
+// register (NOT AT, because bne_far used by the pre-barrier clobbers AT when the
+// branch target is too far for a direct branch) and passing tmp4 to the barriers.
+// Because the offset is always smaller than the G1 card size (512 bytes), the card
+// containing tmp4 is the same as the card of the actual store.
+instruct g1StoreNIndOffset8(indOffset8 mem, mRegN src)
+%{
+  // Predicate: UseG1GC only — no barrier_data check.  After bimorphic
+  // deoptimisation+recompilation of HashMap.putVal, C2 may set barrier_data=0
+  // for tab[i]=newNode() stores while still creating old→young references.
+  // No named TEMPs: K0, K1, AT are C2-invisible (see g1StoreP for rationale).
+  // AT holds the effective address; K0 holds the old OOP; K1 is scratch.
+  // AT is recomputed after write_barrier_pre (which clobbers AT via bne_far).
+  predicate(UseG1GC);
   match(Set mem (StoreN mem src));
-  effect(TEMP tmp1, TEMP tmp2, TEMP tmp3);
-  ins_cost(130);
-  format %{ "amswap_db_w    R0, $src, $mem # @g1StoreN" %}
+  effect();
+  ins_cost(130); // slightly above g1StoreN to prefer indirect when both could match
+  format %{ "sw    $src, $mem\t# @g1StoreNIndOffset8" %}
   ins_encode %{
-    write_barrier_pre(masm, this,
-                      $mem$$Register /* obj */,
-                      $tmp1$$Register /* pre_val */,
-                      $tmp2$$Register /* tmp1 */,
-                      $tmp3$$Register /* tmp2 */,
-                      RegSet::of($mem$$Register, $src$$Register) /* preserve */);
-    __ amswap_db_w(R0, $src$$Register, as_Register($mem$$base));
+    assert(Assembler::is_simm16($mem$$disp), "disp must fit in daddiu imm16");
+    // (1) Old narrow OOP: null-check + SATB.
+    __ lwu(K0, as_Register($mem$$base), $mem$$disp);
+    // (2) Effective address into AT.
+    __ daddiu(AT, as_Register($mem$$base), $mem$$disp);
+    // (3) Store.
+    __ sw($src$$Register, AT, 0);
+    // (4) Pre-barrier (clobbers AT via bne_far).  Preserve base: it's used to
+    // recompute AT in step (5).  Without this, a full SATB queue triggers a
+    // C runtime call that may clobber caller-save base, corrupting step (5).
+    write_barrier_pre(masm, this, noreg, K0, AT, K1,
+                      RegSet::of(as_Register($mem$$base), $src$$Register));
+    // (5) Recompute effective address (AT was clobbered by pre-barrier).
+    __ daddiu(AT, as_Register($mem$$base), $mem$$disp);
     if ((barrier_data() & G1C2BarrierPost) != 0) {
+      // Decode into K0 (old value no longer needed after pre-barrier).
       if ((barrier_data() & G1C2BarrierPostNotNull) == 0) {
-        __ decode_heap_oop($tmp1$$Register, $src$$Register);
+        __ decode_heap_oop(K0, $src$$Register);
       } else {
-        __ decode_heap_oop_not_null($tmp1$$Register, $src$$Register);
+        __ decode_heap_oop_not_null(K0, $src$$Register);
       }
-    }
-    write_barrier_post(masm, this,
-                       $mem$$Register /* store_addr */,
-                       $tmp1$$Register /* new_val */,
-                       $tmp2$$Register /* tmp1 */,
-                       $tmp3$$Register /* tmp2 */);
-  %}
-  ins_pipe(pipe_slow);
-%}
-
-instruct g1EncodePAndStoreN(indirect mem, mRegP src, mRegP tmp1, mRegP tmp2, mRegP tmp3)
-%{
-  predicate(UseG1GC && !needs_releasing_store(n) && n->as_Store()->barrier_data() != 0);
-  match(Set mem (StoreN mem (EncodeP src)));
-  effect(TEMP tmp1, TEMP tmp2, TEMP tmp3);
-  ins_cost(125);
-  format %{ "encodeP_and_storeN    $src, [$mem]\t# TEMP($tmp1, $tmp2, $tmp3) @g1EncodePAndStoreN" %}
-  ins_encode %{
-    guarantee($mem$$disp == 0, "impossible encoding");
-    assert(as_Register($mem$$base) == $mem$$Register, "mem base = register");
-    assert($mem$$index == -1 && $mem$$scale == 0, "assert index or scale");
-    write_barrier_pre(masm, this,
-                      $mem$$Register  /* obj */,
-                      $tmp1$$Register /* pre_val */,
-                      $tmp2$$Register /* tmp1 */,
-                      $tmp3$$Register /* tmp2 */,
-                      RegSet::of($mem$$Register, $src$$Register) /* preserve */);
-    if ((barrier_data() & G1C2BarrierPostNotNull) == 0) {
-      __ encode_heap_oop($tmp1$$Register, $src$$Register);
+      write_barrier_post(masm, this, AT /* store_addr */, K0 /* new_val */, K0, K1);
     } else {
-      __ encode_heap_oop_not_null($tmp1$$Register, $src$$Register);
+      force_card_dirty(masm, AT /* store_addr */, K0, K1);
     }
-    __ loadstore_enc($tmp1$$Register, $mem$$base, $mem$$index, $mem$$scale, $mem$$disp, C2_MacroAssembler::STORE_INT);
-    write_barrier_post(masm, this,
-                       $mem$$Register  /* store_addr */,
-                       $src$$Register  /* new_val */,
-                       $tmp2$$Register /* tmp1 */,
-                       $tmp3$$Register /* tmp2 */);
   %}
   ins_pipe(pipe_slow);
 %}
 
-instruct g1EncodePAndStoreNVolatile(indirect mem, mRegP src, mRegP tmp1, mRegP tmp2, mRegP tmp3)
+instruct g1EncodePAndStoreNIndOffset8(indOffset8 mem, mRegP src)
 %{
-  predicate(UseG1GC && needs_releasing_store(n) && n->as_Store()->barrier_data() != 0);
+  predicate(UseG1GC); // Unconditional: see g1StoreNIndOffset8 comment above.
+  // No named TEMPs: K0, K1, AT (see g1StoreP rationale).
   match(Set mem (StoreN mem (EncodeP src)));
-  effect(TEMP tmp1, TEMP tmp2, TEMP tmp3);
+  effect();
   ins_cost(130);
-  format %{ "encodeP_and_storeN    $src, [$mem]\t# TEMP($tmp1, $tmp2, $tmp3) @g1EncodePAndStoreNVolatile" %}
+  format %{ "encodeP_and_storeN    $src, $mem\t# @g1EncodePAndStoreNIndOffset8" %}
   ins_encode %{
-    write_barrier_pre(masm, this,
-                      $mem$$Register /* obj */,
-                      $tmp1$$Register /* pre_val */,
-                      $tmp2$$Register /* tmp1 */,
-                      $tmp3$$Register /* tmp2 */,
-                      RegSet::of($mem$$Register, $src$$Register) /* preserve */);
+    assert(Assembler::is_simm16($mem$$disp), "disp must fit in daddiu imm16");
+    // (1) Old narrow OOP: null-check + SATB.
+    __ lwu(K0, as_Register($mem$$base), $mem$$disp);
+    // (2) Effective address into AT.
+    __ daddiu(AT, as_Register($mem$$base), $mem$$disp);
+    // (3) Encode new OOP into K1.
     if ((barrier_data() & G1C2BarrierPostNotNull) == 0) {
-      __ encode_heap_oop($tmp1$$Register, $src$$Register);
+      __ encode_heap_oop(K1, $src$$Register);
     } else {
-      __ encode_heap_oop_not_null($tmp1$$Register, $src$$Register);
+      __ encode_heap_oop_not_null(K1, $src$$Register);
     }
-    __ amswap_db_w(R0, $tmp1$$Register, as_Register($mem$$base));
-    write_barrier_post(masm, this,
-                       $mem$$Register /* store_addr */,
-                       $src$$Register /* new_val */,
-                       $tmp2$$Register /* tmp1 */,
-                       $tmp3$$Register /* tmp2 */);
+    // (4) Store.
+    __ sw(K1, AT, 0);
+    // (5) Pre-barrier (clobbers AT).  Preserve base: reused at step (6).
+    write_barrier_pre(masm, this, noreg, K0, K1, AT,
+                      RegSet::of(as_Register($mem$$base), $src$$Register));
+    // (6) Recompute effective address.
+    __ daddiu(AT, as_Register($mem$$base), $mem$$disp);
+    if ((barrier_data() & G1C2BarrierPost) != 0) {
+      write_barrier_post(masm, this, AT, $src$$Register, K0, K1);
+    } else {
+      force_card_dirty(masm, AT, K0, K1);
+    }
   %}
   ins_pipe(pipe_slow);
 %}
 
-instruct g1CompareAndExchangeP(mRegP res, indirect mem, mRegP oldval, mRegP newval, mRegP tmp1, mRegP tmp2)
+// NOTE: g1StoreNBasePosIndexScaleOffset8 and g1EncodePAndStoreNBasePosIndexScaleOffset8
+// were removed.  These instructions used the basePosIndexScaleOffset8 memory operand
+// (UseLEXT1-gated), which carries base and index registers via the MEMORY_INTER interface.
+// C2's register allocator does not generate SpillCopy nodes for memory-operand registers
+// in the same way as explicit input nodes: the allocator assigns T2 for the base but does
+// not emit the T0→T2 copy before the first sub-instruction (lw K0, 0(T2)), so T2 carries
+// a stale caller-save value and the load faults.
+//
+// Without these instructions, the C2 instruction selector pre-computes the effective
+// address (base+idx*scale+disp) into an explicit register and then matches g1StoreN or
+// g1EncodePAndStoreN (indirect, zero-disp), which handle register initialization correctly.
+// The G1 barriers are still applied on the correct address.
+
+instruct g1CompareAndExchangeP(mRegP res, g1SafeIndirect mem, mRegP oldval, mRegP newval, g1TmpRegP tmp1, g1TmpRegP tmp2)
 %{
   predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0);
   match(Set res (CompareAndExchangeP mem (Binary oldval newval)));
@@ -258,9 +316,6 @@ instruct g1CompareAndExchangeP(mRegP res, indirect mem, mRegP oldval, mRegP newv
     guarantee($mem$$disp == 0, "impossible encoding");
     assert_different_registers($oldval$$Register, $mem$$Register);
     assert_different_registers($newval$$Register, $mem$$Register);
-    // Pass $oldval to the pre-barrier (instead of loading from $mem), because
-    // $oldval is the only value that can be overwritten.
-    // The same holds for g1CompareAndSwapP and its Acq variant.
     write_barrier_pre(masm, this,
                       noreg             /* obj */,
                       $oldval$$Register /* pre_val */,
@@ -279,7 +334,7 @@ instruct g1CompareAndExchangeP(mRegP res, indirect mem, mRegP oldval, mRegP newv
   ins_pipe(pipe_slow);
 %}
 
-instruct g1CompareAndExchangePAcq(mRegP res, indirect mem, mRegP oldval, mRegP newval, mRegP tmp1, mRegP tmp2)
+instruct g1CompareAndExchangePAcq(mRegP res, g1SafeIndirect mem, mRegP oldval, mRegP newval, g1TmpRegP tmp1, g1TmpRegP tmp2)
 %{
   predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0 &&
             (((CompareAndExchangeNode*)n)->order() == MemNode::acquire || ((CompareAndExchangeNode*)n)->order() == MemNode::seqcst));
@@ -291,9 +346,6 @@ instruct g1CompareAndExchangePAcq(mRegP res, indirect mem, mRegP oldval, mRegP n
     guarantee($mem$$disp == 0, "impossible encoding");
     assert_different_registers($oldval$$Register, $mem$$Register);
     assert_different_registers($newval$$Register, $mem$$Register);
-    // Pass $oldval to the pre-barrier (instead of loading from $mem), because
-    // $oldval is the only value that can be overwritten.
-    // The same holds for g1CompareAndSwapP and its Acq variant.
     write_barrier_pre(masm, this,
                       noreg             /* obj */,
                       $oldval$$Register /* pre_val */,
@@ -312,7 +364,7 @@ instruct g1CompareAndExchangePAcq(mRegP res, indirect mem, mRegP oldval, mRegP n
   ins_pipe(pipe_slow);
 %}
 
-instruct g1CompareAndExchangeN(mRegN res, indirect mem, mRegN oldval, mRegN newval, mRegP tmp1, mRegP tmp2, mRegP tmp3)
+instruct g1CompareAndExchangeN(mRegN res, g1SafeIndirect mem, mRegN oldval, mRegN newval, g1TmpRegP tmp1, g1TmpRegP tmp2, g1TmpRegP tmp3)
 %{
   predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0);
   match(Set res (CompareAndExchangeN mem (Binary oldval newval)));
@@ -342,7 +394,7 @@ instruct g1CompareAndExchangeN(mRegN res, indirect mem, mRegN oldval, mRegN newv
   ins_pipe(pipe_slow);
 %}
 
-instruct g1CompareAndExchangeNAcq(mRegN res, indirect mem, mRegN oldval, mRegN newval, mRegP tmp1, mRegP tmp2, mRegP tmp3)
+instruct g1CompareAndExchangeNAcq(mRegN res, g1SafeIndirect mem, mRegN oldval, mRegN newval, g1TmpRegP tmp1, g1TmpRegP tmp2, g1TmpRegP tmp3)
 %{
   predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0 &&
             (((CompareAndExchangeNode*)n)->order() == MemNode::acquire || ((CompareAndExchangeNode*)n)->order() == MemNode::seqcst));
@@ -373,7 +425,7 @@ instruct g1CompareAndExchangeNAcq(mRegN res, indirect mem, mRegN oldval, mRegN n
   ins_pipe(pipe_slow);
 %}
 
-instruct g1CompareAndSwapP(mRegI res, indirect mem, mRegP newval, mRegP tmp1, mRegP tmp2, mRegP oldval)
+instruct g1CompareAndSwapP(mRegI res, g1SafeIndirect mem, mRegP newval, g1TmpRegP tmp1, g1TmpRegP tmp2, mRegP oldval)
 %{
   predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0);
   match(Set res (CompareAndSwapP mem (Binary oldval newval)));
@@ -403,7 +455,7 @@ instruct g1CompareAndSwapP(mRegI res, indirect mem, mRegP newval, mRegP tmp1, mR
   ins_pipe(pipe_slow);
 %}
 
-instruct g1CompareAndSwapPAcq(mRegI res, indirect mem, mRegP newval, mRegP tmp1, mRegP tmp2, mRegP oldval)
+instruct g1CompareAndSwapPAcq(mRegI res, g1SafeIndirect mem, mRegP newval, g1TmpRegP tmp1, g1TmpRegP tmp2, mRegP oldval)
 %{
   predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0 &&
             (((CompareAndSwapNode*)n)->order() == MemNode::acquire || ((CompareAndSwapNode*)n)->order() == MemNode::seqcst));
@@ -434,7 +486,7 @@ instruct g1CompareAndSwapPAcq(mRegI res, indirect mem, mRegP newval, mRegP tmp1,
   ins_pipe(pipe_slow);
 %}
 
-instruct g1CompareAndSwapN(mRegI res, indirect mem, mRegN newval, mRegP tmp1, mRegP tmp2, mRegP tmp3, mRegN oldval)
+instruct g1CompareAndSwapN(mRegI res, g1SafeIndirect mem, mRegN newval, g1TmpRegP tmp1, g1TmpRegP tmp2, g1TmpRegP tmp3, mRegN oldval)
 %{
   predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0);
   match(Set res (CompareAndSwapN mem (Binary oldval newval)));
@@ -465,7 +517,7 @@ instruct g1CompareAndSwapN(mRegI res, indirect mem, mRegN newval, mRegP tmp1, mR
   ins_pipe(pipe_slow);
 %}
 
-instruct g1CompareAndSwapNAcq(mRegI res, indirect mem, mRegN newval, mRegP tmp1, mRegP tmp2, mRegP tmp3, mRegN oldval)
+instruct g1CompareAndSwapNAcq(mRegI res, g1SafeIndirect mem, mRegN newval, g1TmpRegP tmp1, g1TmpRegP tmp2, g1TmpRegP tmp3, mRegN oldval)
 %{
   predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0 &&
             (((CompareAndSwapNode*)n)->order() == MemNode::acquire || ((CompareAndSwapNode*)n)->order() == MemNode::seqcst));
@@ -497,23 +549,34 @@ instruct g1CompareAndSwapNAcq(mRegI res, indirect mem, mRegN newval, mRegP tmp1,
   ins_pipe(pipe_slow);
 %}
 
-instruct g1GetAndSetP(indirect mem, mRegP newval, mRegP tmp1, mRegP tmp2, mRegP preval)
+instruct g1GetAndSetP(g1SafeIndirect mem, mRegP newval, g1TmpRegP tmp1, g1TmpRegP tmp2, mRegP preval)
 %{
   predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0);
   match(Set preval (GetAndSetP mem newval));
   effect(TEMP preval, TEMP tmp1, TEMP tmp2);
   ins_cost(2 * MEMORY_REF_COST);
-  format %{ "amswap_db_d    $preval, $newval, [$mem]\t# TEMP($tmp1, $tmp2) @g1GetAndSetP" %}
+  format %{ "xchg_d    $preval, $newval, [$mem]\t# TEMP($tmp1, $tmp2) @g1GetAndSetP" %}
   ins_encode %{
     guarantee($mem$$disp == 0, "impossible encoding");
     assert_different_registers($mem$$Register, $newval$$Register);
     write_barrier_pre(masm, this,
                       $mem$$Register    /* obj */,
-                      $preval$$Register /* pre_val (as a temporary register) */,
+                      $preval$$Register /* pre_val (used as temp before the xchg) */,
                       $tmp1$$Register   /* tmp1 */,
                       $tmp2$$Register   /* tmp2 */,
                       RegSet::of($mem$$Register, $preval$$Register, $newval$$Register) /* preserve */);
-    __ amswap_db_d($preval$$Register, $newval$$Register, as_Register($mem$$base));
+    // Atomic exchange using LL/SC loop: preval <- [mem], [mem] <- newval
+    {
+      Label retry;
+      __ sync();
+      __ bind(retry);
+      __ lld($preval$$Register, Address(as_Register($mem$$base), 0));
+      __ move(AT, $newval$$Register);
+      __ scd(AT, Address(as_Register($mem$$base), 0));
+      __ beq(AT, R0, retry);
+      __ delayed()->nop();
+      __ sync();
+    }
     write_barrier_post(masm, this,
                        $mem$$Register    /* store_addr */,
                        $newval$$Register /* new_val */,
@@ -523,13 +586,13 @@ instruct g1GetAndSetP(indirect mem, mRegP newval, mRegP tmp1, mRegP tmp2, mRegP 
   ins_pipe(pipe_slow);
 %}
 
-instruct g1GetAndSetN(indirect mem, mRegN newval, mRegP tmp1, mRegP tmp2, mRegP tmp3, mRegN preval)
+instruct g1GetAndSetN(g1SafeIndirect mem, mRegN newval, g1TmpRegP tmp1, g1TmpRegP tmp2, g1TmpRegP tmp3, mRegN preval)
 %{
   predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0);
   match(Set preval (GetAndSetN mem newval));
   effect(TEMP preval, TEMP tmp1, TEMP tmp2, TEMP tmp3);
   ins_cost(2 * MEMORY_REF_COST);
-  format %{ "amswap_db_w    $preval, $newval, [$mem]\t# TEMP($tmp1, $tmp2) @g1GetAndSetN" %}
+  format %{ "xchg_w    $preval, $newval, [$mem]\t# TEMP($tmp1, $tmp2) @g1GetAndSetN" %}
   ins_encode %{
     guarantee($mem$$disp == 0, "impossible encoding");
     assert_different_registers($mem$$Register, $newval$$Register);
@@ -539,8 +602,21 @@ instruct g1GetAndSetN(indirect mem, mRegN newval, mRegP tmp1, mRegP tmp2, mRegP 
                       $tmp2$$Register /* tmp1 */,
                       $tmp3$$Register /* tmp2 */,
                       RegSet::of($mem$$Register, $preval$$Register, $newval$$Register) /* preserve */);
-    __ amswap_db_w(AT, $newval$$Register, as_Register($mem$$base));
-    __ bstrpick_d($preval$$Register, AT, 31, 0);
+    // Atomic exchange of narrow oop using LL/SC loop
+    {
+      Label retry;
+      __ sync();
+      __ bind(retry);
+      __ ll(AT, Address(as_Register($mem$$base), 0));
+      __ move($preval$$Register, AT);
+      __ move(AT, $newval$$Register);
+      __ sc(AT, Address(as_Register($mem$$base), 0));
+      __ beq(AT, R0, retry);
+      __ delayed()->nop();
+      __ sync();
+    }
+    // Zero-extend the 32-bit old value in preval (ll sign-extends, narrow oops are unsigned)
+    __ dext($preval$$Register, $preval$$Register, 0, 32);
     __ decode_heap_oop($tmp1$$Register, $newval$$Register);
     write_barrier_post(masm, this,
                        $mem$$Register  /* store_addr */,
@@ -551,7 +627,7 @@ instruct g1GetAndSetN(indirect mem, mRegN newval, mRegP tmp1, mRegP tmp2, mRegP 
   ins_pipe(pipe_slow);
 %}
 
-instruct g1LoadP(mRegP dst, indirect mem, mRegP tmp1, mRegP tmp2)
+instruct g1LoadP(mRegP dst, g1SafeIndirect mem, g1TmpRegP tmp1, g1TmpRegP tmp2)
 %{
   predicate(UseG1GC && n->as_Load()->barrier_data() != 0);
   match(Set dst (LoadP mem));
@@ -570,13 +646,13 @@ instruct g1LoadP(mRegP dst, indirect mem, mRegP tmp1, mRegP tmp2)
   ins_pipe(pipe_slow);
 %}
 
-instruct g1LoadN(mRegN dst, indirect mem, mRegP tmp1, mRegP tmp2, mRegP tmp3)
+instruct g1LoadN(mRegN dst, g1SafeIndirect mem, g1TmpRegP tmp1, g1TmpRegP tmp2, g1TmpRegP tmp3)
 %{
   predicate(UseG1GC && n->as_Load()->barrier_data() != 0);
   match(Set dst (LoadN mem));
   effect(TEMP dst, TEMP tmp1, TEMP tmp2, TEMP tmp3);
   ins_cost(125);
-  format %{ "ld_wu    $dst, [$mem]\t# TEMP($tmp1, $tmp2, $tmp3) @g1LoadN" %}
+  format %{ "lw    $dst, [$mem]\t# TEMP($tmp1, $tmp2, $tmp3) @g1LoadN" %}
   ins_encode %{
     guarantee($mem$$disp == 0, "impossible encoding");
     __ loadstore_enc($dst$$Register, $mem$$base, $mem$$index, $mem$$scale, $mem$$disp, C2_MacroAssembler::LOAD_U_INT);

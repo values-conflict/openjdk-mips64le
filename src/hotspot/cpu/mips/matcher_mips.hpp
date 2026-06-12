@@ -142,4 +142,37 @@
   // Implements a variant of EncodeISOArrayNode that encode ASCII only
   static const bool supports_encode_ascii_array = false;
 
+  // Pre-selection size estimates (no vector support on MIPS).
+  static int vector_op_pre_select_sz_estimate(int vopc, BasicType ety, int vlen) {
+    return 0;
+  }
+  static int scalar_op_pre_select_sz_estimate(int vopc, BasicType ety) {
+    return 0;
+  }
+
+  // No vector constant rotate support on MIPS.
+  static constexpr bool supports_vector_constant_rotates(int shift) {
+    return false;
+  }
+
+  // No vector predicate emulation on MIPS.
+  static bool supports_vector_predicate_op_emulation(int vopc, int vlen, BasicType bt) {
+    return false;
+  }
+
+  // Vector test second argument not needed (MIPS has no predicate vectors).
+  static constexpr bool vectortest_needs_second_argument(bool is_alltrue, bool is_predicate) {
+    return false;
+  }
+
+  // BoolTest mask for vector test intrinsics.
+  static constexpr BoolTest::mask vectortest_mask(bool is_alltrue, bool is_predicate, int vlen) {
+    return is_alltrue ? BoolTest::eq : BoolTest::ne;
+  }
+
+  // SIMD sort not supported on MIPS.
+  static bool supports_simd_sort(BasicType bt) {
+    return false;
+  }
+
 #endif // CPU_MIPS_MATCHER_MIPS_HPP

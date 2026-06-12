@@ -2393,7 +2393,7 @@ class StubGenerator: public StubCodeGenerator {
     //    Preserves len
     //    Leaves s pointing to the address which was in d at start
     void reverse(Register d, Register s, Register len, Register tmp1, Register tmp2) {
-      assert(tmp1 < S0 && tmp2 < S0, "register corruption");
+      assert(tmp1->encoding() < S0->encoding() && tmp2->encoding() < S0->encoding(), "register corruption");
 
       sll(tmp1, len, LogBytesPerWord);
       addu(s, s, tmp1);
@@ -2891,15 +2891,23 @@ class StubGenerator: public StubCodeGenerator {
 #endif
   }
 
+  // Compiler intrinsic stubs (AES, SHA, etc.) -- MIPS has no hardware crypto.
+  // This is intentionally empty; all crypto stubs remain null ("not supported").
+  void generate_compiler_stubs() {
+#if COMPILER2_OR_JVMCI
+    // No MIPS-specific compiler intrinsic stubs implemented yet.
+    // All StubRoutines::_aescrypt_encryptBlock etc. remain null.
+#endif
+  }
+
  public:
   StubGenerator(CodeBuffer* code, StubGenBlobId blob_id) : StubCodeGenerator(code, blob_id) {
-    // Map jdk25u blob IDs to generate phases.
-    // generate_initial: basic stubs (forward_exception, call_stub, catch_exception)
-    // generate_all: arraycopy stubs + verify_oop (only generated once, in final_id)
     switch(blob_id) {
       case initial_id:
-      case compiler_id:
         generate_initial();
+        break;
+      case compiler_id:
+        generate_compiler_stubs();
         break;
       case continuation_id:
         generate_continuation_stubs();

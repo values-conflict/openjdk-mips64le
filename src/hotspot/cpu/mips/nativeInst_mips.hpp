@@ -168,6 +168,8 @@ class NativeCall: public NativeInstruction {
     displacement_offset         =   0
   };
 
+  static int byte_size() { return instruction_size; }
+
   address instruction_address() const       { return addr_at(instruction_offset); }
 
   address next_instruction_address() const  {
@@ -752,7 +754,16 @@ public:
     return true;
   }
   bool patch(int32_t oopmap_slot, int32_t cb_offset);
-  void make_deopt() { Unimplemented(); }
+  void make_deopt() {
+    // Overwrite all three words of the post-call-nop sequence with plain NOPs
+    // so that check() returns false and the site is no longer tracked.
+    // Any thread returning to this address will harmlessly execute NOPs.
+    uint32_t* p = (uint32_t*)addr_at(0);
+    p[0] = 0x00000000;  // keep NOP (was already NOP)
+    p[1] = 0x00000000;  // was ORI $0,$0,lo -- zero → check() fails
+    p[2] = 0x00000000;  // was ORI $0,$0,hi -- zero → check() fails
+    ICache::invalidate_range(addr_at(0), 12);
+  }
 };
 
 inline NativePostCallNop* nativePostCallNop_at(address address) {
@@ -773,8 +784,13 @@ class NativeDeoptInstruction: public NativeInstruction {
 public:
   address instruction_address() const { return addr_at(0); }
   address next_instruction_address() const { return addr_at(4); }
+  // On MIPS, deopt sites are represented by plain NOPs (see make_deopt above).
+  // is_deopt_at is only used in debug asserts (release builds skip it).
   static bool is_deopt_at(address instr) { return false; }
-  static void insert(address where) { Unimplemented(); }
+  static void insert(address where) {
+    *(uint32_t*)where = 0x00000000;
+    ICache::invalidate_range(where, 4);
+  }
 };
 
 #endif // CPU_MIPS_VM_NATIVEINST_MIPS_HPP

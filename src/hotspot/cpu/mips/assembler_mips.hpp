@@ -211,6 +211,7 @@ class AddressLiteral {
 
   friend class Assembler;
   friend class MacroAssembler;
+  friend class C2_MacroAssembler;
   friend class Address;
   friend class LIR_Assembler;
   RelocationHolder rspec_from_rtype(relocInfo::relocType rtype, address addr) {

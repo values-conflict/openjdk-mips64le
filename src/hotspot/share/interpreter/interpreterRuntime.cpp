@@ -721,7 +721,6 @@ void InterpreterRuntime::resolve_get_put(Bytecodes::Code bytecode, int field_ind
   entry->fill_in(info.field_holder(), info.offset(),
                  checked_cast<u2>(info.index()), checked_cast<u1>(state),
                  static_cast<u1>(get_code), static_cast<u1>(put_code));
-  // MIPS DEBUG: print what was stored + check expression stack
 }
 
 

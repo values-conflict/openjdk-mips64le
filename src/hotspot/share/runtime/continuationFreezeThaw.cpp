@@ -1777,11 +1777,17 @@ static inline freeze_result freeze_internal(JavaThread* current, intptr_t* const
   assert(!current->cont_fastpath() || freeze.check_valid_fast_path(), "");
   bool fast = UseContinuationFastPath && current->cont_fastpath();
 #if defined(MIPS64)
-  // MIPS is interpreter-only: freeze_fast_copy raw-copies the stack without
-  // calling set_top_frame_metadata_pd, so chunk_sp[-2] gets a raw saved-FP
-  // (which is absolute) instead of the relative offset that StackChunkFrameStream
-  // needs for ChunkFrames::Mixed.  Always use the slow path which calls
-  // finish_freeze → set_top_frame_metadata_pd and sets has_mixed_frames=true.
+  // TEMPORARY WORKAROUND -- MUST REMOVE before declaring port complete.
+  // Fix in: Phase 7 (port cleanup; implement freeze_fast_copy in cpu/mips/).
+  //
+  // freeze_fast_copy raw-copies the stack without calling
+  // set_top_frame_metadata_pd, so chunk_sp[-2] gets the raw saved FP
+  // (absolute) instead of the relative offset that StackChunkFrameStream
+  // needs for ChunkFrames::Mixed.  Always use the slow path, which calls
+  // finish_freeze -> set_top_frame_metadata_pd and sets has_mixed_frames=true.
+  //
+  // Proper fix: implement a MIPS-specific freeze_fast_copy in cpu/mips/ that
+  // calls set_top_frame_metadata_pd, then remove this block.
   fast = false;
 #endif
   if (fast && freeze.size_if_fast_freeze_available() > 0) {

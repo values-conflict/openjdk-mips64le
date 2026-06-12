@@ -335,7 +335,7 @@ void VM_Version::get_processor_features() {
       FLAG_SET_DEFAULT(UseSyncLevel, 10000);
     }
   } else {
-    assert(false, "Should Not Reach Here, what is the cpu type?");
+    // Unknown CPU sync-capability combination; default to highest sync level.
     if (FLAG_IS_DEFAULT(UseSyncLevel)) {
       FLAG_SET_DEFAULT(UseSyncLevel, 10000);
     }
@@ -529,6 +529,27 @@ void VM_Version::get_processor_features() {
   // counts are managed differently.  Use the default (LM_LIGHTWEIGHT).
 
   // CriticalJNINatives removed in jdk25u
+
+  // Cap the ergonomic MaxHeapSize to keep CompressedOops in shift=0 mode.
+  //
+  // MIPS64 C2 currently only supports CompressedOops shift=0 (heap below
+  // UnscaledOopHeapMax = 4 GB).  When the heap exceeds 4 GB the JVM selects
+  // shift=3, which changes how NarrowOop values are encoded; several C2 code
+  // paths have not been validated at shift=3 and may produce wrong code.
+  //
+  // Limit the ergonomic (auto-selected) heap so shift=0 is always used.
+  // An explicit -Xmx can still exceed 4 GB; that is the user's choice.
+#if defined(_LP64)
+  if (UseCompressedOops && FLAG_IS_DEFAULT(MaxHeapSize)) {
+    const size_t mips_max = (size_t)UnscaledOopHeapMax - HeapBaseMinAddress;
+    if (MaxHeapSize > mips_max) {
+      log_info(gc, heap)("MIPS: capping ergonomic MaxHeapSize to %zuG "
+                         "to keep CompressedOops in zero-based (shift=0) mode.",
+                         mips_max / G);
+      FLAG_SET_ERGO(MaxHeapSize, mips_max);
+    }
+  }
+#endif
 }
 
 void VM_Version::initialize() {

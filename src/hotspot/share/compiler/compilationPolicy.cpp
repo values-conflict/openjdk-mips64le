@@ -1359,6 +1359,17 @@ CompLevel CompilationPolicy::transition_from_none(const methodHandle& method, Co
   // If we were at full profile level, would we switch to full opt?
   if (transition_from_full_profile<Predicate>(method, CompLevel_full_profile) == CompLevel_full_optimization) {
     next_level = CompLevel_full_optimization;
+  } else if (CompilationModeFlag::disable_intermediate() &&
+             apply_predicate<Predicate>(method, cur_level, i, b, delay_profiling, Tier0ProfileDelayFactor)) {
+    // In C2-only mode (no C1, HIGH_ONLY), there is no intermediate profiling tier.
+    // Advance directly to C2 once the invocation threshold is met.  Without this,
+    // the !disable_intermediate() guard on the path below blocks all C2 compilation
+    // for freshly-loaded methods.
+    //
+    // Note: On MIPS, interpreter-level MDO (MethodData) is not created because the
+    // MIPS template interpreter does not call the profiling notify hooks; checking
+    // method->method_data() != nullptr would permanently block compilation.
+    next_level = CompLevel_full_optimization;
   } else if (!CompilationModeFlag::disable_intermediate() && apply_predicate<Predicate>(method, cur_level, i, b, delay_profiling, Tier0ProfileDelayFactor)) {
     // C1-generated fully profiled code is about 30% slower than the limited profile
     // code that has only invocation and backedge counters. The observation is that

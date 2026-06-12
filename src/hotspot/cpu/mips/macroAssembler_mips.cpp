@@ -283,8 +283,8 @@ int MacroAssembler::insts_for_general_call(address target) {
 }
 
 int MacroAssembler::ic_check_size() {
-  // 2 loads + 1 branch + 1 nop + 1 jump (patchable) = ~5 instructions × 4 bytes
-  return 5 * 4;
+  // 2 loads + beq + delayed nop + patchable_jump (6 instrs) = 10 instructions × 4 bytes
+  return 10 * 4;
 }
 
 int MacroAssembler::ic_check(int end_alignment) {
@@ -293,7 +293,8 @@ int MacroAssembler::ic_check(int end_alignment) {
   Register tmp1 = AT;
   Register tmp2 = T2;
 
-  align(end_alignment);
+  // Align so that the VEP (bind ic_hit, immediately after the check) lands at end_alignment.
+  align(end_alignment, offset() + ic_check_size());
   int uep_offset = offset();
 
   if (UseCompressedClassPointers) {
@@ -356,17 +357,27 @@ address MacroAssembler::trampoline_call(AddressLiteral entry, CodeBuffer *cbuf) 
          || entry.rspec().type() == relocInfo::virtual_call_type, "wrong reloc type");
 
   address target = entry.target();
-  if (!reachable_from_cache()) {
-    address stub = emit_trampoline_stub(offset(), target);
+  // Emit a trampoline stub in the stubs section when the target is not reachable
+  // by a direct jal from anywhere in the code cache, OR when the specific target
+  // is outside the jal range (e.g. libjvm.so IC miss stub is not in code cache).
+  address stub = nullptr;
+  if (!reachable_from_cache(target)) {
+    stub = emit_trampoline_stub(offset(), target);
     if (stub == NULL) {
       return NULL; // CodeCache is full
     }
   }
 
   if (cbuf) cbuf->set_insts_mark();
+  // Capture call instruction start address for static stub linking.
+  // emit_to_interp_stub uses this as the mark for static_stub_Relocation;
+  // find_stub_for() searches for a stub whose mark == call start, so
+  // we must return the start (not pc() after the call).
+  address call_pc = pc();
   relocate(entry.rspec());
 
-  if (reachable_from_cache()) {
+  if (reachable_from_cache(target)) {
+    // Target is in the code cache within jal range.
     nop();
     nop();
     nop();
@@ -374,18 +385,19 @@ address MacroAssembler::trampoline_call(AddressLiteral entry, CodeBuffer *cbuf) 
     jal(target);
     delayed()->nop();
   } else {
-    // load the call target from the trampoline stub
-    // branch
-    long dest = (long)pc();
-    dest += (dest & 0x8000) << 1;
-    lui(T9, dest >> 32);
-    ori(T9, T9, split_low(dest >> 16));
+    // Target is outside jal range (e.g. IC miss stub in libjvm.so).
+    // Load the actual target address from the trampoline stub and call via jalr T9.
+    // The stub is at address 'stub' in the stubs section.
+    long sa = (long)stub;
+    sa += (sa & 0x8000) << 1;  // adjust for sign extension of low 16 bits
+    lui(T9, sa >> 32);
+    ori(T9, T9, split_low(sa >> 16));
     dsll(T9, T9, 16);
-    ld(T9, T9, simm16(split_low(dest)));
+    ld(T9, T9, simm16(split_low(sa)));  // T9 = *(stub) = actual call target
     jalr(T9);
     delayed()->nop();
   }
-  return pc();
+  return call_pc;
 }
 
 // Emit a trampoline stub for a call to a target which is too far away.
@@ -1970,7 +1982,14 @@ void MacroAssembler::rem_d(FloatRegister fd, FloatRegister fs, FloatRegister ft,
 }
 
 void MacroAssembler::align(int modulus) {
-  while (offset() % modulus != 0) nop();
+  align(modulus, offset());
+}
+
+// Ensure that the code at target bytes offset from the current offset() is aligned
+// according to modulus.
+void MacroAssembler::align(int modulus, int target) {
+  int delta = target - offset();
+  while ((offset() + delta) % modulus != 0) nop();
 }
 
 
@@ -2336,7 +2355,12 @@ void  MacroAssembler::decode_heap_oop_not_null(Register r) {
       daddu(r, r, S5_heapbase);
     }
   } else {
-    assert (CompressedOops::base() == NULL, "sanity");
+    // shift == 0: heap fits in 32-bit range; base may still be non-zero.
+    if (CompressedOops::base() != NULL) {
+      move(AT, r);
+      daddu(r, r, S5_heapbase);
+      movz(r, R0, AT);
+    }
   }
 }
 
@@ -2360,9 +2384,16 @@ void  MacroAssembler::decode_heap_oop_not_null(Register dst, Register src) {
       }
     }
   } else {
-    assert (CompressedOops::base() == NULL, "sanity");
+    // shift == 0: heap fits in 32-bit range; base may still be non-zero.
+    // Always emit movz even in the not-null path: it is a NOP when src is
+    // genuinely non-null, but protects against compressed-null (0) decoding
+    // to base instead of 0 when C2's non-null analysis is overly optimistic.
     if (dst != src) {
       move(dst, src);
+    }
+    if (CompressedOops::base() != NULL) {
+      daddu(dst, dst, S5_heapbase);
+      movz(dst, R0, src);
     }
   }
 }
@@ -2632,7 +2663,7 @@ void MacroAssembler::check_klass_subtype_slow_path(Register sub_klass,
   // Don't worry too much about pre-existing connections with the input regs.
 
 #ifndef PRODUCT
-  int* pst_counter = &SharedRuntime::_partial_subtype_ctr;
+  uint* pst_counter = &SharedRuntime::_partial_subtype_ctr;
   ExternalAddress pst_counter_addr((address) pst_counter);
 #endif //PRODUCT
 

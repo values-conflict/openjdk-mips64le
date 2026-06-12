@@ -851,11 +851,99 @@ uint PhaseChaitin::build_ifg_physical( ResourceArea *a ) {
     // Clone (rather than smash in place) the liveout info, so it is alive
     // for the "collect_gc_info" phase later.
     IndexSet liveout(_live->live(block));
+    // Save the initial liveout for the cross-block stale-liveness fix below.
+    // We need to know which LRGs were live at the block exit (from PhaseLive)
+    // so that when a definition removes an OOP LRG from liveout, we can detect
+    // whether a SpillCopy in a successor block still needs it.
+    const IndexSet& initial_liveout = *_live->live(block);
 
     uint first_inst = first_nonphi_index(block);
     uint last_inst = block->end_idx();
 
+    // Cross-block Y < W < X stale-liveness fix.
+    //   B1: Y = non-OOP def, W = OOP def, both in B1
+    //   B2 (successor): X uses LRG_OOP (possibly via a SpillCopy inserted by allocator)
+    // PhaseLive puts LRG_OOP in B1's liveout (initial_liveout) because B2 uses it.
+    // build_ifg_physical backward walk removes LRG_OOP at W; by the time it reaches Y,
+    // LRG_OOP is gone from liveout, so no interference edge Y—OOP is created.
+    // The allocator may then assign OOP and Y (integer) to the same physical register.
+    // After W redefines it with OOP, an integer computation at Y reuses that register,
+    // leaving a wrong value when X reads OOP — sign-extending via ADDU may produce
+    // a kernel-space address, crashing the JVM.
+    //
+    // Fix: at W (OOP def removal from liveout), re-insert OOP if (a) OOP is in
+    // initial_liveout (successor needs it) AND (b) a non-OOP def exists before W
+    // (= Y exists).  Re-inserting keeps OOP live through the backward walk so that
+    // when Y is processed, interfere_with_live(Y_lid, &liveout) creates edge Y—OOP.
+    //
+    // Note: live-through integers (defined in a predecessor block, live across B1)
+    // are also covered because they are in liveout throughout the block and therefore
+    // included in the edges created when their uses are processed.
+    //
+    // Performance note: for OOP-heavy methods (HashMap::putVal etc.) this may add
+    // many extra interference edges on each build_ifg_physical call, causing more
+    // spills.  In extreme cases putVal hits the 27-spill-iteration sanity limit and
+    // falls back to interpreter.  For short/simple methods (buildRootDirectory, etc.)
+    // the overhead is small.  The spill-split-recycle limit prevents runaway cascade.
+    //
     move_exception_node_up(block, first_inst, last_inst);
+
+    // For small methods (< 75 B), also handle the intra-block Y < W < X case:
+    //   Y < W < X all in B1, where X is a SpillCopy reading LRG_OOP at position > W.
+    // PhaseLive does NOT propagate intra-block SpillCopy sources to initial_liveout,
+    // so the initial_liveout.member(lid) check below misses this case.
+    // Pre-scan: for each SpillCopy source LRG that is OOP, record the max position
+    // of any SpillCopy that reads it in this block.  Used at the re-insert site.
+    // Only done for small methods to avoid the spill cascade that affects large
+    // OOP-heavy methods like HashMap::putVal (see Performance note above).
+    // small_user_method: a user-defined method with few bytecodes (< 75).
+    // NOT runtime stubs (C->method() == nullptr) — stubs use _trip_cnt == 0 to avoid cascade.
+    const bool small_user_method = (C->method() != nullptr && C->method()->code_size() < 200);
+    const uint SC_MAX = 32;
+    uint sc_lrg[SC_MAX], sc_pos_max[SC_MAX];
+    uint sc_count = 0;
+    if (small_user_method) {
+      for (uint x_pos = first_inst; x_pos <= last_inst; x_pos++) {
+        Node* sc = block->get_node(x_pos);
+        if (!sc->is_SpillCopy()) continue;
+        uint copy_idx = sc->is_Copy();
+        if (!copy_idx) continue;
+        uint src_lid = _lrg_map.live_range_id(sc->in(copy_idx));
+        if (!src_lid || src_lid >= _ifg->_maxlrg || !lrgs(src_lid)._is_oop) continue;
+        // Only track if the source OOP has an intra-block def before X (W < X in block).
+        uint w_pos = 0;
+        for (uint pd = first_inst; pd < x_pos; pd++) {
+          if (_lrg_map.live_range_id(block->get_node(pd)) == src_lid) w_pos = pd;
+        }
+        if (!w_pos) continue;
+        // And a non-OOP def before W (= Y exists).
+        bool has_int_before_w = false;
+        for (uint pi = first_inst; pi < w_pos; pi++) {
+          uint pi_lid = _lrg_map.live_range_id(block->get_node(pi));
+          if (pi_lid && pi_lid != src_lid && pi_lid < _ifg->_maxlrg && !lrgs(pi_lid)._is_oop) {
+            has_int_before_w = true; break;
+          }
+        }
+        if (!has_int_before_w) continue;
+        bool found = false;
+        for (uint k = 0; k < sc_count; k++) {
+          if (sc_lrg[k] == src_lid) { if (x_pos > sc_pos_max[k]) sc_pos_max[k] = x_pos; found = true; break; }
+        }
+        if (!found && sc_count < SC_MAX) { sc_lrg[sc_count] = src_lid; sc_pos_max[sc_count++] = x_pos; }
+      }
+    }
+
+    // Precompute the first non-OOP def position in the block (O(block_size) once,
+    // after move_exception_node_up which may reorder nodes).
+    // Used to make the per-W has_int_before_w check O(1) at the call site below.
+    uint first_non_oop_def = UINT_MAX; // sentinel: no non-OOP def in block
+    for (uint pre = first_inst; pre <= last_inst; pre++) {
+      uint pre_lid = _lrg_map.live_range_id(block->get_node(pre));
+      if (pre_lid && pre_lid < _ifg->_maxlrg && !lrgs(pre_lid)._is_oop) {
+        first_non_oop_def = pre;
+        break;
+      }
+    }
 
     Pressure int_pressure(last_inst + 1, Matcher::int_pressure_limit());
     Pressure float_pressure(last_inst + 1, Matcher::float_pressure_limit());
@@ -903,6 +991,32 @@ uint PhaseChaitin::build_ifg_physical( ResourceArea *a ) {
           if (liveout.remove(lid)) {
             lower_pressure(block, location, lrg, &liveout, int_pressure, float_pressure);
           }
+          // Cross-block Y < W < X: re-insert OOP into liveout so subsequent positions
+          // (Y and earlier) create the missing interference edges via interfere_with_live.
+          // See block comment above for the full explanation.
+          //
+          // Restricted to methods with bytecode size <= 200 (or runtime stubs where
+          // C->method() is null).  The crash sites we observe are all short methods
+          // (buildRootDirectory=71B, setTabAt=19B, readIfNeeded=148B, etc.).
+          // For larger methods (putVal=300B, resize=356B) the re-insert fires hundreds
+          // of times per spill iteration, producing massively over-spilled compiled
+          // code that is slower than the interpreter (>2x regression in benchmarks).
+          // Those large methods have never been observed as crash sites, so skipping
+          // the re-insert for them is safe.
+          // Cross-block: OOP in initial_liveout AND Y before W.
+          // Intra-block (small methods only): SpillCopy X at pos > W reads OOP.
+          {
+            bool should_reinsert = lrgs(lid)._is_oop && first_non_oop_def < location &&
+              ((initial_liveout.member(lid) && small_user_method) ||
+               (initial_liveout.member(lid) && _trip_cnt == 0));
+            if (!should_reinsert && small_user_method && lrgs(lid)._is_oop && first_non_oop_def < location) {
+              for (uint k = 0; k < sc_count; k++) {
+                if (sc_lrg[k] == lid && sc_pos_max[k] > location) { should_reinsert = true; break; }
+              }
+            }
+            if (should_reinsert) liveout.insert(lid);
+          }
+
           uint copy_idx = n->is_Copy();
           if (copy_idx) {
             uint lid_copy = _lrg_map.live_range_id(n->in(copy_idx));
