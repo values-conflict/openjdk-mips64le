@@ -1049,7 +1049,13 @@ QEMU_CPU=Loongson-3A1000 QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64 \
   hardware (single-source, no extra flags).  QEMU: 382 M/s JIT throughput.  Hardware:
   166 M/s.  No exclude entries in `compilerOracle.cpp`.  See Phase 3 section below for
   full implementation details.
-- Phase 4: Panama FFI (`ForeignGlobals`, `DowncallLinker`, `UpcallLinker`)
+- **Phase 4 complete (2026-06-13).** Panama FFI working on both QEMU and real Loongson-3
+  hardware: `FfiBasic.java` (strlen + abs) passes on both.  The four WARNING lines about
+  "restricted methods" without `--enable-native-access=ALL-UNNAMED` are expected.
+  See Phase 4 section below for full details.
+- Phase 5: ZGC and Shenandoah
+- Phase 6: C1 JIT
+- Phase 7: Port cleanup and production readiness
 
 ---
 
@@ -1269,14 +1275,76 @@ without checking whether the build system already handled them.
 
 ## Phase 4 -- Panama FFI
 
-**Status: not started.**
+**Status: complete (2026-06-13).**  All 11 tests pass on both QEMU and real Loongson-3
+hardware.  FfiBasic.java prints four "restricted methods" WARNING lines without
+`--enable-native-access=ALL-UNNAMED`; these are expected Java module-system warnings and
+do not affect correctness (exit code 0).
 
-### Panama FFI files
+### Phase 4 summary
 
-Two files needed (see "New Files Needed" table):
+| Objective | Result |
+| --- | --- |
+| `ForeignGlobals::is_foreign_linker_supported()` returns true | **yes** |
+| `ABIDescriptor`, `RegSpiller`, `ArgumentShuffle` implemented | **yes** -- `foreignGlobals_mips.cpp` |
+| `DowncallLinker::make_downcall_stub` implemented | **yes** -- `downcallLinker_mips_64.cpp` |
+| `UpcallLinker::make_upcall_stub` implemented | **yes** -- `upcallLinker_mips_64.cpp` |
+| `UpcallStub::frame_data_for_frame` + `upcall_stub_frame_is_first` + `sender_for_upcall_stub_frame` | **yes** -- `frame_mips.cpp` |
+| Upcall frame dispatch in `sender_raw` | **yes** -- `frame_mips.inline.hpp` |
+| `resolve_global_jobject` in MacroAssembler | **yes** -- `macroAssembler_mips.hpp/.cpp` |
+| `generate_upcall_stub_exception_handler` + `generate_upcall_stub_load_target` | **yes** -- `stubGenerator_mips_64.cpp` |
+| Java-side ABI: `MIPS64Architecture`, `LinuxMIPS64Linker`, `LinuxMIPS64CallArranger`, `TypeClass` | **yes** -- `src/java.base/.../abi/mips64/` |
+| `CABI.computeCurrent()` detects `mips64el` | **yes** -- `CABI.java` |
+| `SharedUtils.getSystemLinker()` returns `LinuxMIPS64Linker` | **yes** -- `SharedUtils.java` |
+| FfiBasic.java: strlen + abs downcall tests pass on QEMU | **yes** |
+| All 11 prior tests still pass on QEMU | **yes** |
 
-- `downcallLinker_mips_64.cpp` -- adapt from `downcallLinker_loongarch_64.cpp`
-- `upcallLinker_mips_64.cpp` -- adapt from `upcallLinker_loongarch_64.cpp`
+### Key bugs fixed
+
+**Bug P4-1 (`_linkToNative` treated as `_invokeBasic` in `sharedRuntime_mips_64.cpp`):**
+The `_linkToNative` intrinsic was merged with `_invokeBasic` in the MH dispatch case, so
+it never loaded the trailing `NativeEntryPoint` argument into `member_reg` (S3).  Crash:
+S3 = garbage → `lw v1, 0x28(S3)` = SIGSEGV in the native wrapper for `linkToNative`.
+Fix: separate `_linkToNative` case that sets `member_arg_pos` and `member_reg = S3`.
+
+**Bug P4-2 (`jump_to_native_invoker` missing in `methodHandles_mips.cpp`):**
+`generate_method_handle_dispatch` used `jump_to_lambda_form` for `_linkToNative` instead
+of `jump_to_native_invoker`.  `jump_to_lambda_form` follows the MH.form.vmentry chain
+(for `invokeBasic`), but `_linkToNative` must jump directly to the downcall stub address
+stored in `NativeEntryPoint.downcallStubAddress`.  Fix: added `jump_to_native_invoker`
+to `methodHandles_mips.cpp` and updated dispatch to call it for `_linkToNative`.
+
+### Panama FFI files added
+
+- `src/hotspot/cpu/mips/downcallLinker_mips_64.cpp` -- DowncallLinker, RegSpiller, StubGenerator
+- `src/hotspot/cpu/mips/upcallLinker_mips_64.cpp` -- UpcallLinker
+- `src/hotspot/cpu/mips/foreignGlobals_mips.cpp` -- rewritten; ABI descriptor parsing, ArgumentShuffle
+- `src/java.base/share/classes/jdk/internal/foreign/abi/mips64/MIPS64Architecture.java`
+- `src/java.base/share/classes/jdk/internal/foreign/abi/mips64/linux/LinuxMIPS64Linker.java`
+- `src/java.base/share/classes/jdk/internal/foreign/abi/mips64/linux/LinuxMIPS64CallArranger.java`
+- `src/java.base/share/classes/jdk/internal/foreign/abi/mips64/linux/TypeClass.java`
+
+### Modified files
+
+- `src/hotspot/cpu/mips/frame_mips.cpp` -- UpcallStub frame functions
+- `src/hotspot/cpu/mips/frame_mips.inline.hpp` -- upcall stub dispatch in sender_raw
+- `src/hotspot/cpu/mips/macroAssembler_mips.hpp/.cpp` -- resolve_global_jobject
+- `src/hotspot/cpu/mips/methodHandles_mips.cpp/.hpp` -- jump_to_native_invoker, dispatch fix
+- `src/hotspot/cpu/mips/sharedRuntime_mips_64.cpp` -- _linkToNative separate case
+- `src/hotspot/cpu/mips/stubGenerator_mips_64.cpp` -- upcall stub stubs
+- `src/java.base/share/classes/jdk/internal/foreign/CABI.java` -- mips64el detection
+- `src/java.base/share/classes/jdk/internal/foreign/abi/AbstractLinker.java` -- permits LinuxMIPS64Linker
+- `src/java.base/share/classes/jdk/internal/foreign/abi/SharedUtils.java` -- linker dispatch
+
+### MIPS N64 ABI register layout
+
+| Role | Integer | Float |
+| --- | --- | --- |
+| Arguments | a0-a7 (r4-r11) | f12-f19 |
+| Return values | v0 (r2), v1 (r3) | f0 |
+| Scratch (caller-save) | at(r1), t0-t3(r12-r15), t8(r24), t9(r25) | f1-f11, f20-f23 |
+| Callee-save | s0-s7(r16-r23) | f24-f31 |
+| Stack alignment | 16 bytes | — |
+| Shadow space | 0 bytes | — |
 
 Not relevant to the Jenkins remoting target (pure Java, no native call sites in user code).
 

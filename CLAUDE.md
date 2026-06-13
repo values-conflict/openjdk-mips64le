@@ -176,6 +176,10 @@ with `java FileName.java`.
   be pre-compiled with host javac before running** — single-source launch floods the
   C2 queue with ~8000 javac framework compilations, preventing step()/run() from
   ever being compiled; `run-tests-qemu.sh` handles this automatically)
+- `tests/phase-4/` -- Panama FFI: `FfiBasic.java` (Panama downcall test: `strlen`
+  and `abs` via `Linker.nativeLinker()` and `downcallHandle`; requires
+  `--enable-native-access=ALL-UNNAMED`; `run-tests-qemu.sh` adds this automatically
+  for phase-4 tests)
 
 Run against the built jdk25u:
 
@@ -570,3 +574,25 @@ hardware with the latest build (IC fix + G1 improvements included):
 **Phase 3 is complete.**  All 10 tests pass on both QEMU (382 M/s) and real Loongson-3
 hardware (166 M/s), single-source launch, no extra JVM flags, no `exclude` entries in
 `compilerOracle.cpp`.  See `hardware-timing/phase-3.txt` for full timing data.
+
+**Phase 4 QEMU complete (2026-06-12).**  Panama FFI implemented: downcall and upcall linkers,
+MIPS N64 ABI Java-side descriptor, UpcallStub frame support, upcall load-target stub,
+and `resolve_global_jobject` in MacroAssembler.  Two pre-existing bugs fixed:
+
+- `_linkToNative` in `sharedRuntime_mips_64.cpp` was merged with `_invokeBasic` and never
+  loaded the NativeEntryPoint into `member_reg` (S3) → SIGSEGV in linkToNative native wrapper.
+- `generate_method_handle_dispatch` used `jump_to_lambda_form` for `_linkToNative` instead
+  of `jump_to_native_invoker` → SIGILL (landed in ShouldNotCallThis territory).
+
+`FfiBasic.java` test (strlen + abs downcalls) passes on QEMU.  All 11 tests pass:
+
+```
+./run-tests-qemu.sh 60 120
+# → 11 passed, 0 failed, 0 timed out
+```
+
+Phase 4 is not required for the Jenkins remoting target (pure Java), but all 11 tests also
+pass on real Loongson-3 hardware (2026-06-13).  FfiBasic.java prints four WARNING lines
+about "restricted methods" when run without `--enable-native-access=ALL-UNNAMED`; these
+are expected Java module-system warnings, not errors — the test still exits 0.
+See `porting-notes.md` Phase 4 section and `hardware-timing/phase-4.txt` for details.

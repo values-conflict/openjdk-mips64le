@@ -33,6 +33,7 @@ tests=(
     "tests/phase-2/Phase2Test.java"
     "tests/phase-3/CurrentThread.java"
     "tests/phase-3/Phase3Test.java"
+    "tests/phase-4/FfiBasic.java"
 )
 
 pass=0
@@ -42,11 +43,15 @@ hang=0
 for entry in "${tests[@]}"; do
     read -r -a parts <<< "$entry"
     file="${parts[0]}"
-    args=("${parts[@]:1}")
+    args=( "${parts[@]:1}" )
     name="$(basename "$file" .java)"
 
     printf "%-20s ... " "$name"
-    output=$(timeout --kill-after=5s "$TIMEOUT" "$JAVA" "$file" "${args[@]}" 2>&1) && rc=0 || rc=$?
+    jvmArgs=()
+    if [[ "$file" == tests/phase-4/* ]]; then
+        jvmArgs+=( '--enable-native-access=ALL-UNNAMED' )
+    fi
+    output=$(timeout --kill-after=5s "$TIMEOUT" "$JAVA" "${jvmArgs[@]}" "$file" "${args[@]}" 2>&1) && rc=0 || rc=$?
     if [ $rc -eq 0 ]; then
         echo "PASS"
         pass=$((pass + 1))
