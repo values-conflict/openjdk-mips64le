@@ -896,9 +896,19 @@ uint PhaseChaitin::build_ifg_physical( ResourceArea *a ) {
     // of any SpillCopy that reads it in this block.  Used at the re-insert site.
     // Only done for small methods to avoid the spill cascade that affects large
     // OOP-heavy methods like HashMap::putVal (see Performance note above).
-    // small_user_method: a user-defined method with few bytecodes (< 75).
+    // small_user_method: a user-defined method with few bytecodes (< 200).
     // NOT runtime stubs (C->method() == nullptr) — stubs use _trip_cnt == 0 to avoid cascade.
-    const bool small_user_method = (C->method() != nullptr && C->method()->code_size() < 200);
+    //
+    // Restricted to _trip_cnt <= 3 (first 4 spill-split-recycle trips).  On later trips the
+    // re-inserts add only false interference edges: by trip 3 every genuine Y < W < X
+    // aliasing pattern has been detected and the conflicting values split into separate LRGs,
+    // so re-inserting further only increases IFG density.  The denser IFG makes Select's
+    // O(N×D) re_insert loop progressively slower each trip, causing the 28-trip bail to
+    // take 19+ hours on hardware (slow MIPS) even after the SpillCopy scan SC_MAX cap.
+    // Limiting to 4 trips bounds the false-edge accumulation; String::hashCode then
+    // converges in ~5-6 trips total instead of 28.  Methods that genuinely need the fix
+    // (buildRootDirectory=71B, setTabAt=19B) converge well within 4 trips.
+    const bool small_user_method = (C->method() != nullptr && C->method()->code_size() < 200 && _trip_cnt <= 3);
     const uint SC_MAX = 32;
     uint sc_lrg[SC_MAX], sc_pos_max[SC_MAX];
     uint sc_count = 0;
@@ -929,7 +939,19 @@ uint PhaseChaitin::build_ifg_physical( ResourceArea *a ) {
         for (uint k = 0; k < sc_count; k++) {
           if (sc_lrg[k] == src_lid) { if (x_pos > sc_pos_max[k]) sc_pos_max[k] = x_pos; found = true; break; }
         }
-        if (!found && sc_count < SC_MAX) { sc_lrg[sc_count] = src_lid; sc_pos_max[sc_count++] = x_pos; }
+        if (!found && sc_count < SC_MAX) {
+          sc_lrg[sc_count] = src_lid;
+          sc_pos_max[sc_count++] = x_pos;
+        } else if (!found) {
+          // SC_MAX distinct OOP sources already tracked.  Stop scanning: continuing would
+          // scan every remaining SpillCopy node's predecessor list, costing O(N²) per
+          // block in block-size N.  After many spill-split-recycle trips, N (SpillCopy
+          // count) grows large, making the scan O(N² × trips) — the root cause of
+          // String::hashCode taking 19+ hours to hit the 28-trip bailout limit.
+          // For small methods (few SpillCopy nodes, e.g. buildRootDirectory at 71 B),
+          // sc_count never reaches SC_MAX, so this break never fires.
+          break;
+        }
       }
     }
 
