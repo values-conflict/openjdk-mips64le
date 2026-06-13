@@ -17,11 +17,12 @@ BENCH_TIMEOUT="${2:-120}"
 export QEMU_CPU=Loongson-3A1000
 export QEMU_LD_PREFIX=/usr/mips64el-linux-gnuabi64
 
-# Pre-compile Bench.java as a separate step so the benchmark JVM starts with a
-# clean C2 queue (no javac framework methods queued ahead of step()/run()).
+# Pre-compile benchmark classes so each benchmark JVM starts with a clean C2 queue
+# (no ~8000 javac framework methods queued ahead of the hot methods under test).
 BENCH_CLASSES="$(mktemp --directory)"
 trap 'rm -rf "$BENCH_CLASSES"' EXIT
 "$JAVAC" --enable-preview --source 25 -d "$BENCH_CLASSES" tests/phase-3/Bench.java
+"$JAVAC" --enable-preview --source 25 -d "$BENCH_CLASSES" tests/phase-3/StringHashBench.java
 
 tests=(
     "tests/phase-1/H2.java"
@@ -83,6 +84,25 @@ else
     echo "FAIL (exit $bench_rc)"
     fail=$((fail + 1))
     echo "$bench_out" | tail -20 | sed 's/^/  /'
+fi
+
+# StringHashBench: String::hashCode + StringLatin1::replace regression (ifg.cpp trip_cnt).
+# Pre-compiled; measures throughput to detect C2 stalling on String::hashCode.
+printf "%-20s ... " "StringHashBench"
+strhashb_out=$(timeout --kill-after=5s "$BENCH_TIMEOUT" \
+    "$JAVA" --enable-preview -cp "$BENCH_CLASSES" StringHashBench 2>&1) && strhashb_rc=0 || strhashb_rc=$?
+if [ $strhashb_rc -eq 0 ]; then
+    echo "PASS"
+    echo "$strhashb_out" | grep -E "warmup:|timed:|PASS:|NOTE:" | sed 's/^/  /'
+    pass=$((pass + 1))
+elif [ $strhashb_rc -eq 124 ]; then
+    echo "HANG (timeout ${BENCH_TIMEOUT}s)"
+    hang=$((hang + 1))
+    echo "  last output: $(echo "$strhashb_out" | tail -3 | head -c 500)"
+else
+    echo "FAIL (exit $strhashb_rc)"
+    fail=$((fail + 1))
+    echo "$strhashb_out" | tail -20 | sed 's/^/  /'
 fi
 
 echo ""
