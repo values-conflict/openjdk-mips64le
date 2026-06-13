@@ -51,6 +51,7 @@ public enum CABI {
     LINUX_RISCV_64,
     LINUX_S390,
     LINUX_LOONGARCH_64,
+    LINUX_MIPS_64,
     FALLBACK,
     UNSUPPORTED;
 
@@ -104,6 +105,10 @@ public enum CABI {
             } else if (arch.equals("loongarch64")) {
                 if (OperatingSystem.isLinux()) {
                     return LINUX_LOONGARCH_64;
+                }
+            } else if (arch.equals("mips64el")) {
+                if (OperatingSystem.isLinux()) {
+                    return LINUX_MIPS_64;
                 }
             }
         } else if (FallbackLinker.isSupported()) {

@@ -258,6 +258,7 @@ public final class SharedUtils {
             case LINUX_RISCV_64 -> LinuxRISCV64Linker.getInstance();
             case LINUX_S390 -> LinuxS390Linker.getInstance();
             case LINUX_LOONGARCH_64 -> LinuxLoongArch64Linker.getInstance();
+            case LINUX_MIPS_64 -> jdk.internal.foreign.abi.mips64.linux.LinuxMIPS64Linker.getInstance();
             case FALLBACK -> FallbackLinker.getInstance();
             case UNSUPPORTED -> throw new UnsupportedOperationException("Platform does not support native linker");
         };

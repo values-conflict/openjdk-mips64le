@@ -25,6 +25,7 @@
 
 #include "asm/macroAssembler.hpp"
 #include "asm/macroAssembler.inline.hpp"
+#include "classfile/javaClasses.hpp"
 #include "compiler/oopMap.hpp"
 #include "gc/shared/barrierSet.hpp"
 #include "gc/shared/barrierSetAssembler.hpp"
@@ -35,6 +36,7 @@
 #include "oops/objArrayKlass.hpp"
 #include "oops/oop.inline.hpp"
 #include "prims/methodHandles.hpp"
+#include "prims/upcallLinker.hpp"
 #include "runtime/continuation.hpp"
 #include "runtime/continuationEntry.inline.hpp"
 #include "runtime/frame.inline.hpp"
@@ -2851,7 +2853,40 @@ class StubGenerator: public StubCodeGenerator {
   // ───────────────────────────────────────────────────────────────────────────
 
 #undef __
-#define __ masm->
+#define __ _masm->
+
+  // exception handler for upcall stubs
+  address generate_upcall_stub_exception_handler() {
+    StubCodeMark mark(this, "StubRoutines", "upcall_stub_exception_handler");
+    address start = __ pc();
+    // RA0 (a0) contains the exception oop on entry
+    __ verify_oop(RA0);
+    __ call(CAST_FROM_FN_PTR(address, UpcallLinker::handle_uncaught_exception), relocInfo::runtime_call_type);
+    __ delayed()->nop();
+    __ should_not_reach_here();
+    return start;
+  }
+
+  // load Method* target of MethodHandle into Rmethod
+  // RT0 (= T0 = r12) = j_rarg0 = jobject receiver
+  address generate_upcall_stub_load_target() {
+    StubCodeMark mark(this, "StubRoutines", "upcall_stub_load_target");
+    address start = __ pc();
+    // Resolve the global jobject handle to an actual oop
+    // T8 and V1 are temporaries (neither is an argument nor return register)
+    __ resolve_global_jobject(RT0, T8, V1);
+    // Traverse the MethodHandle chain to find the target Method*
+    __ load_heap_oop(Rmethod, Address(RT0, java_lang_invoke_MethodHandle::form_offset()), T8, V1);
+    __ load_heap_oop(Rmethod, Address(Rmethod, java_lang_invoke_LambdaForm::vmentry_offset()), T8, V1);
+    __ load_heap_oop(Rmethod, Address(Rmethod, java_lang_invoke_MemberName::method_offset()), T8, V1);
+    __ access_load_at(T_ADDRESS, IN_HEAP, Rmethod,
+                      Address(Rmethod, java_lang_invoke_ResolvedMethodName::vmtarget_offset()),
+                      noreg, noreg);
+    __ sd(Rmethod, Address(TREG, JavaThread::callee_target_offset()));
+    __ jr(RA);
+    __ delayed()->nop();
+    return start;
+  }
 
   void generate_all() {
     // Generates all stubs and initializes the entry points
@@ -2889,6 +2924,9 @@ class StubGenerator: public StubCodeGenerator {
       }
     }
 #endif
+
+    StubRoutines::_upcall_stub_exception_handler = generate_upcall_stub_exception_handler();
+    StubRoutines::_upcall_stub_load_target       = generate_upcall_stub_load_target();
   }
 
   // Compiler intrinsic stubs (AES, SHA, etc.) -- MIPS has no hardware crypto.

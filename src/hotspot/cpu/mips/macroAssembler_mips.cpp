@@ -3219,6 +3219,28 @@ void MacroAssembler::resolve_jobject(Register value,
   bind(done);
 }
 
+void MacroAssembler::resolve_global_jobject(Register value, Register tmp1, Register tmp2) {
+  assert_different_registers(value, tmp1, tmp2);
+  Label done;
+  beq(value, R0, done);    // Use null as-is.
+  delayed()->nop();
+#ifdef ASSERT
+  {
+    Label valid_global_tag;
+    andi(AT, value, (int)JNIHandles::TypeTag::global);
+    bne(AT, R0, valid_global_tag);
+    delayed()->nop();
+    stop("non global jobject using resolve_global_jobject");
+    bind(valid_global_tag);
+  }
+#endif
+  // Resolve global handle (strip the global tag bit)
+  access_load_at(T_OBJECT, IN_NATIVE, value,
+                 Address(value, -(intptr_t)JNIHandles::TypeTag::global), tmp1, tmp2);
+  verify_oop(value);
+  bind(done);
+}
+
 void MacroAssembler::cmp_cmov(Register  op1,
                               Register  op2,
                               Register  dst,

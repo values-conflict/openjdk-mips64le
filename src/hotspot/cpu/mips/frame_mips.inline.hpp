@@ -402,17 +402,6 @@ inline frame frame::sender_for_compiled_frame(RegisterMap* map) const {
   return frame(sender_sp, unextended_sp, *saved_fp_addr, sender_pc);
 }
 
-// frame::upcall_stub_frame_is_first
-inline bool frame::upcall_stub_frame_is_first() const {
-  return false; // MIPS does not support upcall stubs yet
-}
-
-// frame::sender_for_upcall_stub_frame
-inline frame frame::sender_for_upcall_stub_frame(RegisterMap* map) const {
-  ShouldNotCallThis();
-  return frame();
-}
-
 // frame::sender -- dispatches to sender_raw and processes StackWatermarks
 frame frame::sender(RegisterMap* map) const {
   frame result = sender_raw(map);
@@ -440,6 +429,7 @@ inline frame frame::sender_raw(RegisterMap* map) const {
 
   assert(_cb == CodeCache::find_blob(pc()), "Must be the same");
   if (_cb != nullptr) {
+    if (is_upcall_stub_frame()) return sender_for_upcall_stub_frame(map);
     return sender_for_compiled_frame(map);
   }
 

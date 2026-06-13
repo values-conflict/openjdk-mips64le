@@ -37,6 +37,7 @@ import jdk.internal.foreign.abi.aarch64.macos.MacOsAArch64Linker;
 import jdk.internal.foreign.abi.aarch64.windows.WindowsAArch64Linker;
 import jdk.internal.foreign.abi.fallback.FallbackLinker;
 import jdk.internal.foreign.abi.loongarch64.linux.LinuxLoongArch64Linker;
+import jdk.internal.foreign.abi.mips64.linux.LinuxMIPS64Linker;
 import jdk.internal.foreign.abi.ppc64.aix.AixPPC64Linker;
 import jdk.internal.foreign.abi.ppc64.linux.LinuxPPC64Linker;
 import jdk.internal.foreign.abi.ppc64.linux.LinuxPPC64leLinker;
@@ -73,6 +74,7 @@ public abstract sealed class AbstractLinker implements Linker permits LinuxAArch
                                                                       LinuxPPC64Linker, LinuxPPC64leLinker,
                                                                       LinuxRISCV64Linker, LinuxS390Linker,
                                                                       LinuxLoongArch64Linker,
+                                                                      LinuxMIPS64Linker,
                                                                       FallbackLinker {
 
     public interface UpcallStubFactory {
